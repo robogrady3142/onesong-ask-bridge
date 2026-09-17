@@ -112,6 +112,19 @@ function hasApiKey(): boolean {
   return typeof key === "string" && key.trim().length > 20;
 }
 
+/** Safe diagnostics only — never include key material. */
+function apiKeyDiag(): { present: boolean; length: number; names: string[] } {
+  const key = process.env.GEMINI_API_KEY;
+  const names = Object.keys(process.env)
+    .filter((k) => /GEMINI|GOOGLE|GENAI|API_KEY/i.test(k))
+    .sort();
+  return {
+    present: typeof key === "string" && key.length > 0,
+    length: typeof key === "string" ? key.trim().length : 0,
+    names,
+  };
+}
+
 function sanitizeTeachers(raw: string[]): StoreTeacher[] {
   const allowed = new Set<string>(STORE_TEACHER_METADATA);
   const out: StoreTeacher[] = [];
@@ -211,13 +224,16 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   if (!hasApiKey()) {
+    const diag = apiKeyDiag();
     return jsonResponse(
       request,
       {
         ok: false,
         code: "not_configured",
         error: "Question is being connected — use NotebookLM for now.",
-      },
+        // temporary overnight diag — remove once Live Ask works
+        diag,
+      } as QuestionAskResult & { diag: ReturnType<typeof apiKeyDiag> },
       503,
     );
   }
