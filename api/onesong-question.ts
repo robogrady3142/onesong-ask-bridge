@@ -36,16 +36,62 @@ const STORE_TEACHER_METADATA = [
 
 type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
 
-const SYSTEM_PROMPT = `You are answering questions for OneSong Question using only the retrieved File Search documents.
+/** Surname used in in-text citations like [Tweedie]. */
+const TEACHER_LAST_NAME: Record<string, string> = {
+  Abdullah: "Abdullah",
+  Aivanhov: "Aivanhov",
+  Nisragadatta: "Nisargadatta",
+  Brahamananda: "Brahmananda",
+  "Irina Tweedie": "Tweedie",
+  "Hazrat Inayat Khan": "Khan",
+  "Ramana Maharshi": "Ramana",
+  Ramdas: "Ramdas",
+  Vivekananda: "Vivekananda",
+  Aurobindo: "Aurobindo",
+  Gurdjieff: "Gurdjieff",
+  "Hakim Sinai": "Sanai",
+  Rumi: "Rumi",
+  Steiner: "Steiner",
+  "Thomas A Kempis": "Kempis",
+};
+
+function lastNameForTeacher(metadata: string): string {
+  return TEACHER_LAST_NAME[metadata] ?? metadata.split(/\s+/).slice(-1)[0] ?? metadata;
+}
+
+/**
+ * Build system instruction for Ask.
+ * - In-text cites: [Lastname] only (square brackets in the body).
+ * - Default / Custom with 3+ teachers: weave at least three different authors.
+ * - Custom with 1–2 teachers: cite only within that selection (no artificial third).
+ */
+function buildSystemPrompt(
+  mode: "default" | "custom",
+  teachers: string[],
+): string {
+  const lastNames = teachers.map(lastNameForTeacher);
+  const uniqueLast = [...new Set(lastNames)];
+  const minThree =
+    mode === "default" || (mode === "custom" && uniqueLast.length >= 3);
+
+  const authorRule = minThree
+    ? `- Draw on at least three different teachers in the answer. Mark each with an in-text citation.`
+    : `- The reader selected only ${uniqueLast.length} teacher(s) (${uniqueLast.map((n) => `[${n}]`).join(", ")}). Cite only within that selection — do not invent a third author.`;
+
+  return `You are answering questions for OneSong Question using only the retrieved File Search documents.
 
 Rules:
 - Ground answers only in retrieved docs. Do not invent teachings or fill gaps from general knowledge.
 - Write NotebookLM-like natural prose: clear, warm, readable paragraphs — not bullet dumps unless the user asks.
-- Cite sources as teacher + filename (from metadata/citations) so a reader can find the passage.
+${authorRule}
+- Place citations in square brackets inside the body of the text, using only the teacher's last name — e.g. [Gurdjieff], [Tweedie], [Aivanhov], [Ramana]. Do not put full names, book titles, or filenames in the brackets.
+- Examples of last names: Abdullah, Aivanhov, Nisargadatta, Brahmananda, Tweedie, Khan, Ramana, Ramdas, Vivekananda, Aurobindo, Gurdjieff, Sanai, Rumi, Steiner, Kempis.
+- Keep the fuller source list (teacher + filename) for the separate References section when citations metadata is available; the prose itself uses [Lastname] only.
 - If sources conflict or differ in emphasis, briefly say how they meet or where they diverge.
 - If retrieval is thin, say what you found and what is missing — do not speculate.
 - You are not a therapist, not a medical professional, and not a replacement for a human teacher. If the person is in crisis, urge local professional help. Do not provide methods of harm.
 - Plain prose preferred. Keep answers compact unless the question needs more depth.`;
+}
 
 const MODEL_CANDIDATES = [
   "gemini-3.5-flash-lite",
@@ -306,7 +352,7 @@ export async function POST(request: Request): Promise<Response> {
         model,
         contents: question,
         config: {
-          systemInstruction: SYSTEM_PROMPT,
+          systemInstruction: buildSystemPrompt(mode, teachers),
           tools: [{ fileSearch }],
         },
       });
