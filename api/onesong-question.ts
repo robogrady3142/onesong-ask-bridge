@@ -27,6 +27,11 @@ const STORE_TEACHER_METADATA = [
   "Ramdas",
   "Vivekananda",
   "Aurobindo",
+  "Gurdjieff",
+  "Hakim Sinai",
+  "Rumi",
+  "Steiner",
+  "Thomas A Kempis",
 ] as const;
 
 type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
