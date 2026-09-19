@@ -219,6 +219,23 @@ export function stripModelReferencesSection(answer: string): string {
   return out.trimEnd();
 }
 
+/** If the model omitted [n] cites, insert [i] after the first mention of each citation teacher (order matches the app list). */
+function ensureInlineNumberedCites(answer: string, citations: QuestionCitation[]): string {
+  if (/\[\d+\]/.test(answer)) return answer;
+  let out = answer;
+  citations.forEach((c, idx) => {
+    const n = idx + 1;
+    const teacher = (c.teacher || "").trim();
+    if (!teacher) return;
+    const escaped = teacher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${escaped}\\b(?!\\s*\\[\\d+\\])`, "i");
+    if (!re.test(out)) return;
+    out = out.replace(re, (m) => `${m} [${n}]`);
+  });
+  return out;
+}
+
+
 function displayTeacherName(raw?: string): string | undefined {
   if (!raw) return undefined;
   if (raw === "Abdullah" || /^Abdullah\b/i.test(raw)) return "Dougan";
@@ -378,12 +395,16 @@ export async function POST(request: Request): Promise<Response> {
         },
       });
 
-      const answer = stripModelReferencesSection(
-        (
-          typeof (response as { text?: string }).text === "string"
-            ? (response as { text: string }).text
-            : ""
-        ).trim(),
+      const citations = extractCitations(response);
+      const answer = ensureInlineNumberedCites(
+        stripModelReferencesSection(
+          (
+            typeof (response as { text?: string }).text === "string"
+              ? (response as { text: string }).text
+              : ""
+          ).trim(),
+        ),
+        citations,
       );
 
       if (!answer) {
@@ -396,7 +417,7 @@ export async function POST(request: Request): Promise<Response> {
         {
           ok: true,
           answer,
-          citations: extractCitations(response),
+          citations,
           model,
           store: FILE_SEARCH_STORE,
           mode,
