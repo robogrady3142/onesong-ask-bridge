@@ -38,7 +38,7 @@ type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
 
 /** Surname used when expanding numbered References lines. */
 const TEACHER_LAST_NAME: Record<string, string> = {
-  Abdullah: "Abdullah",
+  Abdullah: "Dougan",
   Aivanhov: "Aivanhov",
   Nisragadatta: "Nisargadatta",
   Brahamananda: "Brahmananda",
@@ -91,9 +91,11 @@ CITATION FORMAT (mandatory):
 - Every [n] in the body must appear in References, and every References entry must be used at least once in the body.
 - Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
 - Example References:
-  1. Abdullah — Forty Days
+  1. Dougan — Forty Days
   2. Gurdjieff — Views from the Real World
   3. Tweedie — Daughter of Fire
+
+For Abdullah Dougan sources, the References surname is always Dougan (never Abdullah).
 
 LENGTH:
 - Aim for a standard answer of about 350–500 words (not a short blurb, not an essay). Count the prose before the References heading.
