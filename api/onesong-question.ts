@@ -61,7 +61,8 @@ function lastNameForTeacher(metadata: string): string {
 
 /**
  * Build system instruction for Ask.
- * - In-text cites: [1], [2], … matching a numbered References list at the end.
+ * - In-text cites: [1], [2], … in the body only.
+ * - Do NOT append a References list — the app shows retrieved sources below the answer.
  * - Default / Custom with 3+ teachers: at least three different authors.
  * - Custom with 1–2 teachers: cite only within that selection.
  * - Target length: 350–500 words.
@@ -84,21 +85,15 @@ function buildSystemPrompt(
 CITATION FORMAT (mandatory):
 - In the body, cite with square brackets containing a NUMBER only: [1], [2], [3].
 - Do NOT put teacher names inside the brackets (no [Gurdjieff], no [Tweedie]).
-- At the end of the answer, add a References section that lists the same numbers with a full reference each line:
-  References
-  1. Teacher last name — work or filename (from the retrieved docs)
-  2. …
-- Every [n] in the body must appear in References, and every References entry must be used at least once in the body.
+- Do NOT add a References, REFERENCES, Sources, or bibliography section at the end (or anywhere). The app already lists retrieved sources under the answer, numbered to match your [n] cites.
+- Use [1], [2], [3] for distinct retrieved works/files in the order you lean on them. Keep numbering stable through the answer.
 - Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
-- Example References:
-  1. Dougan — Forty Days
-  2. Gurdjieff — Views from the Real World
-  3. Tweedie — Daughter of Fire
+- End after the last prose paragraph — no heading named References.
 
-For Abdullah Dougan sources, the References surname is always Dougan (never Abdullah).
+For Abdullah Dougan material, if you name the teacher in prose use Dougan (never Abdullah as the surname form).
 
 LENGTH:
-- Aim for a standard answer of about 350–500 words (not a short blurb, not an essay). Count the prose before the References heading.
+- Aim for a standard answer of about 350–500 words (not a short blurb, not an essay).
 
 Rules:
 - Ground answers only in retrieved docs. Do not invent teachings or fill gaps from general knowledge.
@@ -107,7 +102,7 @@ ${authorRule}
 - If sources conflict or differ in emphasis, briefly say how they meet or where they diverge.
 - If retrieval is thin, say what you found and what is missing — do not speculate.
 - You are not a therapist, not a medical professional, and not a replacement for a human teacher. If the person is in crisis, urge local professional help. Do not provide methods of harm.
-- Prefer prose. Keep the References list compact (teacher + work/filename; optional short locator).`;
+- Prefer prose.`;
 }
 
 const MODEL_CANDIDATES = [
@@ -216,64 +211,66 @@ function scrubError(message: string): string {
   return message.split(key).join("[redacted]");
 }
 
+/** Drop a model-emitted References block so it does not duplicate the app citation list. */
+export function stripModelReferencesSection(answer: string): string {
+  let out = answer.replace(/\n+#{0,3}\s*References?\s*\n(?:[ \t]*\d+\.\s+[^\n]*\n?)+\s*$/i, "");
+  out = out.replace(/\n+#{0,3}\s*References?\s*\n(?:[ \t]*\d+\.\s+[^\n]*\n?)+/gi, "\n");
+  return out.trimEnd();
+}
+
+function displayTeacherName(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  if (raw === "Abdullah" || /^Abdullah\b/i.test(raw)) return "Dougan";
+  return TEACHER_LAST_NAME[raw] ?? raw;
+}
+
 function extractCitations(response: unknown): QuestionCitation[] {
   const citations: QuestionCitation[] = [];
+  const seenFile = new Set<string>();
   try {
     const candidates =
-      (
-        response as {
-          candidates?: Array<{
-            grounding_metadata?: unknown;
-            groundingMetadata?: unknown;
-          }>;
-        }
-      )?.candidates ?? [];
+      (response as { candidates?: Array<{ grounding_metadata?: unknown; groundingMetadata?: unknown }> })
+        ?.candidates ?? [];
     for (const cand of candidates) {
       const gm =
-        (cand as { groundingMetadata?: { groundingChunks?: unknown[] } })
-          .groundingMetadata ??
-        (cand as { grounding_metadata?: { grounding_chunks?: unknown[] } })
-          .grounding_metadata;
+        (cand as { groundingMetadata?: { groundingChunks?: unknown[] } }).groundingMetadata ??
+        (cand as { grounding_metadata?: { grounding_chunks?: unknown[] } }).grounding_metadata;
       const chunks =
         (gm as { groundingChunks?: unknown[] })?.groundingChunks ??
         (gm as { grounding_chunks?: unknown[] })?.grounding_chunks ??
         [];
       for (const chunk of chunks) {
         const rc =
-          (chunk as { retrievedContext?: Record<string, unknown> })
-            .retrievedContext ??
-          (chunk as { retrieved_context?: Record<string, unknown> })
-            .retrieved_context;
+          (chunk as { retrievedContext?: Record<string, unknown> }).retrievedContext ??
+          (chunk as { retrieved_context?: Record<string, unknown> }).retrieved_context;
         if (!rc) continue;
         const metaList =
-          (rc.customMetadata as Array<{
-            key?: string;
-            stringValue?: string;
-            string_value?: string;
-          }>) ??
-          (rc.custom_metadata as Array<{
-            key?: string;
-            stringValue?: string;
-            string_value?: string;
-          }>) ??
+          (rc.customMetadata as Array<{ key?: string; stringValue?: string; string_value?: string }>) ??
+          (rc.custom_metadata as Array<{ key?: string; stringValue?: string; string_value?: string }>) ??
           [];
         const meta: Record<string, string> = {};
         for (const m of metaList) {
           if (m?.key) meta[m.key] = m.stringValue ?? m.string_value ?? "";
         }
+        const file = String(rc.title ?? meta.source_path ?? "") || undefined;
+        const fileKey = (file ?? "").toLowerCase();
+        if (fileKey && seenFile.has(fileKey)) continue;
+        if (fileKey) seenFile.add(fileKey);
         const text = String(rc.text ?? "").slice(0, 240);
         citations.push({
-          teacher: meta.teacher || undefined,
-          file: String(rc.title ?? meta.source_path ?? "") || undefined,
+          teacher: displayTeacherName(meta.teacher || undefined),
+          file,
           snippet: text || undefined,
         });
       }
     }
   } catch {
-    // Citations are best-effort.
+    // Citations are best-effort; answer text still returns.
   }
   return citations;
 }
+
+
 
 function isAuthorized(request: Request): boolean {
   return request.headers.get(BRIDGE_HEADER) === BRIDGE_TOKEN;
@@ -367,8 +364,8 @@ export async function POST(request: Request): Promise<Response> {
 
       const citationNudge =
         mode === "custom" && teachers.length > 0 && teachers.length < 3
-          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only; end with a matching numbered References list (full teacher + work).`
-          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body; end with a numbered References list matching those numbers (full teacher + work). Use at least three different teachers when available.`;
+          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only; do NOT append a References section — sources are listed by the app.`
+          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body; do NOT append a References section — sources are listed by the app. Use at least three different teachers when available.`;
       const response = await ai.models.generateContent({
         model,
         contents: `${question}
@@ -380,11 +377,13 @@ export async function POST(request: Request): Promise<Response> {
         },
       });
 
-      const answer = (
-        typeof (response as { text?: string }).text === "string"
-          ? (response as { text: string }).text
-          : ""
-      ).trim();
+      const answer = stripModelReferencesSection(
+        (
+          typeof (response as { text?: string }).text === "string"
+            ? (response as { text: string }).text
+            : ""
+        ).trim(),
+      );
 
       if (!answer) {
         lastError = `${model}: empty answer`;
