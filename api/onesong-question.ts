@@ -83,12 +83,13 @@ function buildSystemPrompt(
   return `You are answering questions for OneSong Question using only the retrieved File Search documents.
 
 CITATION FORMAT (mandatory):
-- In the body, cite with square brackets containing a NUMBER only: [1], [2], [3].
+- In the body, cite with square brackets containing a NUMBER only: [1], [2], [3]. Every distinct teacher/work you draw on MUST have at least one [n] in the prose.
 - Do NOT put teacher names inside the brackets (no [Gurdjieff], no [Tweedie]).
 - Do NOT add a References, REFERENCES, Sources, or bibliography section at the end (or anywhere). The app already lists retrieved sources under the answer, numbered to match your [n] cites.
-- Use [1], [2], [3] for distinct retrieved works/files in the order you lean on them. Keep numbering stable through the answer.
+- Number distinct retrieved works in the order you first lean on them: first work [1], second [2], third [3]. Keep that numbering stable through the answer.
 - Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
 - End after the last prose paragraph — no heading named References.
+- Answers without any [n] cites are incomplete — always include the numbers in the body.
 
 For Abdullah Dougan material, if you name the teacher in prose use Dougan (never Abdullah as the surname form).
 
@@ -364,8 +365,8 @@ export async function POST(request: Request): Promise<Response> {
 
       const citationNudge =
         mode === "custom" && teachers.length > 0 && teachers.length < 3
-          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only; do NOT append a References section — sources are listed by the app.`
-          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body; do NOT append a References section — sources are listed by the app. Use at least three different teachers when available.`;
+          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only (required); do NOT append a References section — sources are listed by the app.`
+          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body (required); do NOT append a References section — sources are listed by the app. Use at least three different teachers when available.`;
       const response = await ai.models.generateContent({
         model,
         contents: `${question}
