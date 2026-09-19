@@ -36,7 +36,7 @@ const STORE_TEACHER_METADATA = [
 
 type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
 
-/** Surname used in in-text citations like [Tweedie]. */
+/** Surname used when expanding numbered References lines. */
 const TEACHER_LAST_NAME: Record<string, string> = {
   Abdullah: "Abdullah",
   Aivanhov: "Aivanhov",
@@ -61,9 +61,10 @@ function lastNameForTeacher(metadata: string): string {
 
 /**
  * Build system instruction for Ask.
- * - In-text cites: [Lastname] only (square brackets in the body).
- * - Default / Custom with 3+ teachers: weave at least three different authors.
- * - Custom with 1–2 teachers: cite only within that selection (no artificial third).
+ * - In-text cites: [1], [2], … matching a numbered References list at the end.
+ * - Default / Custom with 3+ teachers: at least three different authors.
+ * - Custom with 1–2 teachers: cite only within that selection.
+ * - Target length: 350–500 words.
  */
 function buildSystemPrompt(
   mode: "default" | "custom",
@@ -75,28 +76,36 @@ function buildSystemPrompt(
     mode === "default" || (mode === "custom" && uniqueLast.length >= 3);
 
   const authorRule = minThree
-    ? `- REQUIRED: Use at least three different teachers. After (or within) sentences that draw on a teacher, insert that teacher's last name in square brackets — e.g. [Abdullah], [Aivanhov], [Tweedie]. An answer with fewer than three distinct [Lastname] markers is incomplete; revise before finishing.`
-    : `- The reader selected only ${uniqueLast.length} teacher(s). Cite only these last names in square brackets: ${uniqueLast.map((n) => `[${n}]`).join(", ")}. Do not invent a third author. Still put [Lastname] in the body wherever you draw on them.`;
+    ? `- REQUIRED: Draw on at least three different teachers. Assign each distinct source a number and cite it in the body as [1], [2], [3], …`
+    : `- The reader selected only ${uniqueLast.length} teacher(s) (${uniqueLast.join(", ")}). Use only those sources. Still use numbered in-text cites [1], [2] as needed — do not invent a third author.`;
 
   return `You are answering questions for OneSong Question using only the retrieved File Search documents.
 
 CITATION FORMAT (mandatory):
-- In the body of the answer, cite with square brackets and the teacher's LAST NAME only.
-- Correct: [Gurdjieff] [Tweedie] [Aivanhov] [Ramana] [Abdullah] [Khan] [Steiner]
-- Incorrect: (Gurdjieff), [G. I. Gurdjieff], [Beelzebub's Tales], footnotes, or a Sources list instead of in-text brackets.
-- Example sentence: "Self-observation begins in ordinary life [Abdullah], and attention must be divided [Gurdjieff], while the heart stays soft [Tweedie]."
+- In the body, cite with square brackets containing a NUMBER only: [1], [2], [3].
+- Do NOT put teacher names inside the brackets (no [Gurdjieff], no [Tweedie]).
+- At the end of the answer, add a References section that lists the same numbers with a full reference each line:
+  References
+  1. Teacher last name — work or filename (from the retrieved docs)
+  2. …
+- Every [n] in the body must appear in References, and every References entry must be used at least once in the body.
+- Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
+- Example References:
+  1. Abdullah — Forty Days
+  2. Gurdjieff — Views from the Real World
+  3. Tweedie — Daughter of Fire
+
+LENGTH:
+- Aim for a standard answer of about 350–500 words (not a short blurb, not an essay). Count the prose before the References heading.
 
 Rules:
 - Ground answers only in retrieved docs. Do not invent teachings or fill gaps from general knowledge.
 - Write NotebookLM-like natural prose: clear, warm, readable paragraphs — not bullet dumps unless the user asks.
 ${authorRule}
-- Do not put full names, book titles, or filenames inside the brackets.
-- Allowed last names include: Abdullah, Aivanhov, Nisargadatta, Brahmananda, Tweedie, Khan, Ramana, Ramdas, Vivekananda, Aurobindo, Gurdjieff, Sanai, Rumi, Steiner, Kempis.
-- A separate References list (teacher + filename) may still be produced from citation metadata; the prose itself must already contain the [Lastname] markers.
 - If sources conflict or differ in emphasis, briefly say how they meet or where they diverge.
 - If retrieval is thin, say what you found and what is missing — do not speculate.
 - You are not a therapist, not a medical professional, and not a replacement for a human teacher. If the person is in crisis, urge local professional help. Do not provide methods of harm.
-- Plain prose preferred. Keep answers compact unless the question needs more depth.`;
+- Prefer prose. Keep the References list compact (teacher + work/filename; optional short locator).`;
 }
 
 const MODEL_CANDIDATES = [
@@ -356,8 +365,8 @@ export async function POST(request: Request): Promise<Response> {
 
       const citationNudge =
         mode === "custom" && teachers.length > 0 && teachers.length < 3
-          ? `Remember: put in-text citations as [Lastname] only for the selected teacher(s).`
-          : `Remember: your answer must include at least three different in-text citations shaped exactly like [Lastname] (square brackets, last name only).`;
+          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only; end with a matching numbered References list (full teacher + work).`
+          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body; end with a numbered References list matching those numbers (full teacher + work). Use at least three different teachers when available.`;
       const response = await ai.models.generateContent({
         model,
         contents: `${question}
