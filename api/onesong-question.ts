@@ -62,7 +62,7 @@ function lastNameForTeacher(metadata: string): string {
 /**
  * Build system instruction for Ask.
  * - In-text cites: [1], [2], … in the body only.
- * - Do NOT append a References list — the app shows retrieved sources below the answer.
+ * - Model appends References; server moves that list under the answer (with File Search snippets when available).
  * - Default / Custom with 3+ teachers: at least three different authors.
  * - Custom with 1–2 teachers: cite only within that selection.
  * - Target length: 350–500 words.
@@ -85,11 +85,18 @@ function buildSystemPrompt(
 CITATION FORMAT (mandatory):
 - In the body, cite with square brackets containing a NUMBER only: [1], [2], [3]. Every distinct teacher/work you draw on MUST have at least one [n] in the prose.
 - Do NOT put teacher names inside the brackets (no [Gurdjieff], no [Tweedie]).
-- Do NOT add a References, REFERENCES, Sources, or bibliography section at the end (or anywhere). The app already lists retrieved sources under the answer, numbered to match your [n] cites.
+- After the last prose paragraph, add a References section that lists the same numbers (the app moves this under the answer — keep it only as that trailing section):
+  References
+  1. Teacher last name — work or filename (from the retrieved docs)
+  2. …
+- Every [n] in the body must appear in References, and every References entry must be used at least once in the body.
 - Number distinct retrieved works in the order you first lean on them: first work [1], second [2], third [3]. Keep that numbering stable through the answer.
 - Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
-- End after the last prose paragraph — no heading named References.
-- Answers without any [n] cites are incomplete — always include the numbers in the body.
+- Example References:
+  1. Dougan — Forty Days
+  2. Gurdjieff — Views from the Real World
+  3. Tweedie — Daughter of Fire
+- For Abdullah Dougan sources, the References surname is always Dougan (never Abdullah).
 
 For Abdullah Dougan material, if you name the teacher in prose use Dougan (never Abdullah as the surname form).
 
@@ -242,6 +249,93 @@ function displayTeacherName(raw?: string): string | undefined {
   return TEACHER_LAST_NAME[raw] ?? raw;
 }
 
+/** Parse a trailing model References block into citation rows (then strip it from the answer). */
+export function takeModelReferencesSection(answer: string): {
+  answer: string;
+  citations: QuestionCitation[];
+} {
+  const citations: QuestionCitation[] = [];
+  const re =
+    /\n+#{0,3}\s*References?\s*\n((?:[ \t]*\d+\.\s+[^\n]*\n?)+)\s*$/i;
+  const m = answer.match(re);
+  if (!m) {
+    // Also catch mid-answer References blocks the model still emits
+    const re2 =
+      /\n+#{0,3}\s*References?\s*\n((?:[ \t]*\d+\.\s+[^\n]*\n?)+)/gi;
+    let last: RegExpExecArray | null = null;
+    let match: RegExpExecArray | null;
+    while ((match = re2.exec(answer)) !== null) last = match;
+    if (!last) {
+      return { answer: answer.trimEnd(), citations };
+    }
+    const block = last[1];
+    for (const line of block.split("\n")) {
+      const lm = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
+      if (!lm) continue;
+      const body = lm[1];
+      const parts = body.split(/\s+[—–-]\s+/); // em dash / en dash / hyphen
+      if (parts.length >= 2) {
+        const teacherRaw = parts[0].trim();
+        const rest = parts.slice(1).join(" — ").trim();
+        citations.push({
+          teacher: displayTeacherName(teacherRaw) ?? teacherRaw,
+          file: rest || undefined,
+        });
+      } else {
+        citations.push({ file: body });
+      }
+    }
+    const cleaned = (answer.slice(0, last.index) + answer.slice(last.index + last[0].length))
+      .replace(/\n{3,}/g, "\n\n")
+      .trimEnd();
+    return { answer: cleaned, citations };
+  }
+
+  const block = m[1];
+  for (const line of block.split("\n")) {
+    const lm = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
+    if (!lm) continue;
+    const body = lm[1];
+    const parts = body.split(/\s+[—–-]\s+/);
+    if (parts.length >= 2) {
+      const teacherRaw = parts[0].trim();
+      const rest = parts.slice(1).join(" — ").trim();
+      citations.push({
+        teacher: displayTeacherName(teacherRaw) ?? teacherRaw,
+        file: rest || undefined,
+      });
+    } else {
+      citations.push({ file: body });
+    }
+  }
+  const cleaned = answer.replace(re, "").replace(/\n{3,}/g, "\n\n").trimEnd();
+  return { answer: cleaned, citations };
+}
+
+/** Prefer File Search grounding (with snippets); fall back to parsed model References. */
+function mergeCitations(
+  grounding: QuestionCitation[],
+  parsed: QuestionCitation[],
+): QuestionCitation[] {
+  if (grounding.length === 0) return parsed;
+  if (parsed.length === 0) return grounding;
+  // Prefer File Search snippets; prefer clean model titles when they are not raw paths.
+  return grounding.map((g, i) => {
+    const byTeacher = parsed.find(
+      (p) => p.teacher && g.teacher && p.teacher.toLowerCase() === g.teacher.toLowerCase(),
+    );
+    const p = byTeacher ?? parsed[i];
+    const cleanTitle =
+      p?.file && !/[\\/]/.test(p.file) ? p.file : undefined;
+    return {
+      teacher: g.teacher || p?.teacher,
+      file: cleanTitle || g.file || p?.file,
+      snippet: g.snippet,
+    };
+  });
+}
+
+
 function extractCitations(response: unknown): QuestionCitation[] {
   const citations: QuestionCitation[] = [];
   const seenFile = new Set<string>();
@@ -274,7 +368,7 @@ function extractCitations(response: unknown): QuestionCitation[] {
         const fileKey = (file ?? "").toLowerCase();
         if (fileKey && seenFile.has(fileKey)) continue;
         if (fileKey) seenFile.add(fileKey);
-        const text = String(rc.text ?? "").slice(0, 240);
+        const text = String(rc.text ?? "").slice(0, 400);
         citations.push({
           teacher: displayTeacherName(meta.teacher || undefined),
           file,
@@ -382,8 +476,8 @@ export async function POST(request: Request): Promise<Response> {
 
       const citationNudge =
         mode === "custom" && teachers.length > 0 && teachers.length < 3
-          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only (required); do NOT append a References section — sources are listed by the app.`
-          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body (required); do NOT append a References section — sources are listed by the app. Use at least three different teachers when available.`;
+          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only (required); end with a numbered References list (teacher — work) matching [n]; the app shows it under the answer.`
+          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body (required); end with a numbered References list (teacher — work) matching [n]; the app shows it under the answer. Use at least three different teachers when available.`;
       const response = await ai.models.generateContent({
         model,
         contents: `${question}
@@ -395,17 +489,15 @@ export async function POST(request: Request): Promise<Response> {
         },
       });
 
-      const citations = extractCitations(response);
-      const answer = ensureInlineNumberedCites(
-        stripModelReferencesSection(
-          (
-            typeof (response as { text?: string }).text === "string"
-              ? (response as { text: string }).text
-              : ""
-          ).trim(),
-        ),
-        citations,
-      );
+      const grounding = extractCitations(response);
+      const rawAnswer = (
+        typeof (response as { text?: string }).text === "string"
+          ? (response as { text: string }).text
+          : ""
+      ).trim();
+      const taken = takeModelReferencesSection(rawAnswer);
+      const citations = mergeCitations(grounding, taken.citations);
+      const answer = ensureInlineNumberedCites(taken.answer, citations);
 
       if (!answer) {
         lastError = `${model}: empty answer`;
