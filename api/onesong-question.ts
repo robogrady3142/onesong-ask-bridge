@@ -7,6 +7,7 @@
  * Env: GEMINI_API_KEY (already set on rob-4dcd/solintra)
  */
 import { GoogleGenAI } from "@google/genai";
+import { classifyAskModelExhaustion, scrubError } from "../lib/ask-client-error";
 import { expandCitations } from "../lib/citation-passage-context";
 import {
   displayTeacherName,
@@ -138,7 +139,12 @@ type QuestionAskResult =
     }
   | {
       ok: false;
-      code: "not_configured" | "bad_request" | "error" | "unauthorized";
+      code:
+        | "not_configured"
+        | "bad_request"
+        | "error"
+        | "unauthorized"
+        | "high_demand";
       error?: string;
     };
 
@@ -203,12 +209,6 @@ function buildTeacherFilter(teachers: string[]): string | undefined {
   if (!teachers.length) return undefined;
   if (teachers.length === 1) return `teacher="${teachers[0]}"`;
   return teachers.map((t) => `teacher="${t}"`).join(" OR ");
-}
-
-function scrubError(message: string): string {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key || key.length < 8) return message;
-  return message.split(key).join("[redacted]");
 }
 
 /** Drop a model-emitted References block so it does not duplicate the app citation list. */
@@ -413,6 +413,7 @@ export async function POST(request: Request): Promise<Response> {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
   let lastError = "All models failed.";
+  const modelFailures: unknown[] = [];
   const models = depth === "deep" ? modelCandidatesForDepth("deep") : MODEL_CANDIDATES;
   for (const model of models) {
     try {
@@ -489,6 +490,7 @@ ${draft.rawAnswer}`,
 
       if (!answer) {
         lastError = `${model}: empty answer`;
+        modelFailures.push(lastError);
         continue;
       }
 
@@ -510,16 +512,18 @@ ${draft.rawAnswer}`,
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastError = scrubError(`${model}: ${msg}`);
+      modelFailures.push(err);
     }
   }
 
+  const failure = classifyAskModelExhaustion(modelFailures, lastError);
   return jsonResponse(
     request,
     {
       ok: false,
-      code: "error",
-      error: scrubError(lastError),
+      code: failure.code,
+      error: failure.error,
     },
-    502,
+    failure.status,
   );
 }
