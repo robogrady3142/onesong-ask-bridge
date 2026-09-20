@@ -2,6 +2,9 @@
   "name": "onesong-ask-bridge",
   "private": true,
   "version": "1.0.0",
+  "scripts": {
+    "test": "node --experimental-strip-types --test lib/*.test.ts"
+  },
   "dependencies": {
     "@google/genai": "^2.22.0"
   }

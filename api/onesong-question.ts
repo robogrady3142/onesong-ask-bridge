@@ -7,6 +7,8 @@
  * Env: GEMINI_API_KEY (already set on rob-4dcd/solintra)
  */
 import { GoogleGenAI } from "@google/genai";
+import { expandCitations } from "../lib/citation-passage-context";
+import { getCorpus } from "../lib/question-md-corpus";
 
 export const config = {
   runtime: "nodejs",
@@ -132,6 +134,11 @@ type QuestionCitation = {
   teacher?: string;
   file?: string;
   snippet?: string;
+  contextBefore?: string;
+  passage?: string;
+  paragraph?: string;
+  contextAfter?: string;
+  limitedContext?: boolean;
 };
 
 type QuestionAskResult =
@@ -143,6 +150,8 @@ type QuestionAskResult =
       store: string;
       mode: "default" | "custom";
       teachers: string[];
+      /** True when markdown files were bundled under corpus/. */
+      corpusAvailable: boolean;
     }
   | {
       ok: false;
@@ -336,8 +345,12 @@ function mergeCitations(
 }
 
 
-function extractCitations(response: unknown): QuestionCitation[] {
+function extractCitations(response: unknown): {
+  citations: QuestionCitation[];
+  retrievedTextByFile: Map<string, string>;
+} {
   const citations: QuestionCitation[] = [];
+  const retrievedTextByFile = new Map<string, string>();
   const seenFile = new Set<string>();
   try {
     const candidates =
@@ -366,9 +379,14 @@ function extractCitations(response: unknown): QuestionCitation[] {
         }
         const file = String(rc.title ?? meta.source_path ?? "") || undefined;
         const fileKey = (file ?? "").toLowerCase();
+        const fullText = String(rc.text ?? "");
+        if (fileKey && fullText) {
+          const prev = retrievedTextByFile.get(fileKey);
+          retrievedTextByFile.set(fileKey, prev ? `${prev}\n\n${fullText}` : fullText);
+        }
         if (fileKey && seenFile.has(fileKey)) continue;
         if (fileKey) seenFile.add(fileKey);
-        const text = String(rc.text ?? "").slice(0, 400);
+        const text = fullText.slice(0, 400);
         citations.push({
           teacher: displayTeacherName(meta.teacher || undefined),
           file,
@@ -379,7 +397,7 @@ function extractCitations(response: unknown): QuestionCitation[] {
   } catch {
     // Citations are best-effort; answer text still returns.
   }
-  return citations;
+  return { citations, retrievedTextByFile };
 }
 
 
@@ -489,14 +507,19 @@ export async function POST(request: Request): Promise<Response> {
         },
       });
 
-      const grounding = extractCitations(response);
+      const extracted = extractCitations(response);
       const rawAnswer = (
         typeof (response as { text?: string }).text === "string"
           ? (response as { text: string }).text
           : ""
       ).trim();
       const taken = takeModelReferencesSection(rawAnswer);
-      const citations = mergeCitations(grounding, taken.citations);
+      const merged = mergeCitations(extracted.citations, taken.citations);
+      const corpus = getCorpus();
+      const citations = expandCitations(merged, {
+        corpus,
+        retrievedTextByFile: extracted.retrievedTextByFile,
+      });
       const answer = ensureInlineNumberedCites(taken.answer, citations);
 
       if (!answer) {
@@ -514,6 +537,7 @@ export async function POST(request: Request): Promise<Response> {
           store: FILE_SEARCH_STORE,
           mode,
           teachers,
+          corpusAvailable: corpus.length > 0,
         },
         200,
       );
