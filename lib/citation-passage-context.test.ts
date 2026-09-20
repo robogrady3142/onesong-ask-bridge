@@ -122,11 +122,12 @@ test("retrieved File Search text can expand when corpus is absent", () => {
   assert.equal(exp.contextBefore, BEFORE);
 });
 
-test("expandCitations leaves limitedContext only on failures", () => {
+test("expandCitations leaves limitedContext only when no grounding text is attached", () => {
   const rows = expandCitations(
     [
       { teacher: "Gurdjieff", file: "Views from the Real World", snippet: SNIPPET },
       { teacher: "Gurdjieff", file: "Views from the Real World", snippet: "zzzz not in any source at all really truly" },
+      { teacher: "Dougan", file: "Ego" },
     ],
     {
       corpus: [
@@ -141,9 +142,13 @@ test("expandCitations leaves limitedContext only on failures", () => {
   );
   assert.equal(rows[0].limitedContext, false);
   assert.equal(rows[0].passage, PASSAGE);
-  assert.equal(rows[1].limitedContext, true);
+  assert.equal(rows[1].limitedContext, false);
+  assert.equal(rows[1].snippet, "zzzz not in any source at all really truly");
+  assert.equal(rows[1].context, "zzzz not in any source at all really truly");
   assert.equal(rows[1].passage, undefined);
-  assert.ok(!("contextBefore" in rows[1] && rows[1].contextBefore));
+  assert.equal(rows[1].contextBefore, undefined);
+  assert.equal(rows[2].limitedContext, true);
+  assert.equal(rows[2].passage, undefined);
 });
 
 test("loadCorpus skips README and _-prefixed paths; reads frontmatter", () => {
