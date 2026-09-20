@@ -7,6 +7,14 @@ Auth header: `x-onesong-bridge: onesong-bridge-2026-09`
 
 Production URL: `https://onesong-ask-bridge.vercel.app` (do not change onesong.group DNS).
 
+## Deep dive
+
+`POST /api/onesong-question` accepts optional `depth: "standard" | "deep"` (default `standard`). `deepDive: true` is the same as `depth: "deep"`.
+
+Standard Ask is unchanged: ~350–500 words; Default (and Custom with ≥3 selected teachers) must cite at least three different teacher surnames.
+
+Deep dive aims for ~1000–1400 words. Default, and Custom with ≥5 selected teachers, must cite at least five different teacher surnames (retry once after merge if short; never invent citations). Custom with fewer than five selected stays inside that selection. Deep prefers `gemini-3.5-flash` (flash-lite fallback). Citation format is unchanged: `[1][2]…` in the body plus a trailing References block the server strips/merges.
+
 ## Citation passage context
 
 Successful Ask responses include citation objects that may carry:

@@ -16,22 +16,23 @@ import {
 } from "../lib/question-citations";
 import { getCorpus } from "../lib/question-md-corpus";
 import {
-  THREE_TEACHER_AUTHOR_RULE,
-  THREE_TEACHER_REWRITE_SYSTEM,
+  type AskDepth,
+  answerLengthInstruction,
   citationNudgeForAsk,
   mergeRetrievedTextByFile,
-  narrowTeacherAuthorRule,
-  requiresThreeDistinctTeachers,
-  selectedTeacherSurnames,
+  modelCandidatesForDepth,
+  parseAskDepth,
+  rewriteNudgeForAsk,
+  rewriteSystemForAsk,
   shouldKeepRewrite,
-  shouldRetryForThreeTeachers,
-  threeTeacherRewriteNudge,
+  shouldRetryForMinTeachers,
+  teacherAuthorRule,
   uniqueTeacherSurnames,
 } from "../lib/three-teacher-enforcement";
 
 export const config = {
   runtime: "nodejs",
-  maxDuration: 60,
+  maxDuration: 180,
 };
 
 const FILE_SEARCH_STORE =
@@ -61,21 +62,22 @@ type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
  * Build system instruction for Ask.
  * - In-text cites: [1], [2], … in the body only.
  * - Model appends References; server moves that list under the answer (with File Search snippets when available).
- * - Default / Custom with 3+ teachers: at least three DIFFERENT teachers (distinct surnames); three works from one teacher do not count.
- * - Custom with 1–2 teachers: cite only within that selection (exempt from the three-teacher retry).
- * - Target length: 350–500 words.
+ * - Standard: Default / Custom with 3+ teachers: at least three DIFFERENT teachers
+ *   (distinct surnames); three works from one teacher do not count. ~350–500 words.
+ * - Standard Custom with 1–2 teachers: cite only within that selection (exempt from retry).
+ * - Deep: ~1000–1400 words. Default / Custom with 5+ teachers: at least five DIFFERENT
+ *   teachers; retry once if short. Custom with fewer than 5: cite only within selection.
  */
 function buildSystemPrompt(
   mode: "default" | "custom",
   teachers: string[],
-  opts?: { rewrite?: boolean },
+  opts?: { rewrite?: boolean; depth?: AskDepth },
 ): string {
-  const uniqueLast = selectedTeacherSurnames(teachers);
-  const minThree = requiresThreeDistinctTeachers(mode, teachers);
-
-  const authorRule = minThree
-    ? THREE_TEACHER_AUTHOR_RULE
-    : narrowTeacherAuthorRule(uniqueLast);
+  const depth = opts?.depth ?? "standard";
+  const authorRule = teacherAuthorRule(mode, teachers, depth);
+  const rewriteTail = opts?.rewrite
+    ? `\n\n${rewriteSystemForAsk(mode, teachers, depth)}`
+    : "";
 
   return `You are answering questions for OneSong Question using only the retrieved File Search documents.
 
@@ -99,7 +101,7 @@ CITATION FORMAT (mandatory):
 For Abdullah Dougan material, if you name the teacher in prose use Dougan (never Abdullah as the surname form).
 
 LENGTH:
-- Aim for a standard answer of about 350–500 words (not a short blurb, not an essay).
+${answerLengthInstruction(depth)}
 
 Rules:
 - Ground answers only in retrieved docs. Do not invent teachings or fill gaps from general knowledge.
@@ -108,13 +110,10 @@ ${authorRule}
 - If sources conflict or differ in emphasis, briefly say how they meet or where they diverge.
 - If retrieval is thin, say what you found and what is missing — do not speculate.
 - You are not a therapist, not a medical professional, and not a replacement for a human teacher. If the person is in crisis, urge local professional help. Do not provide methods of harm.
-- Prefer prose.${opts?.rewrite ? `\n\n${THREE_TEACHER_REWRITE_SYSTEM}` : ""}`;
+- Prefer prose.${rewriteTail}`;
 }
 
-const MODEL_CANDIDATES = [
-  "gemini-3.5-flash-lite",
-  "gemini-3.5-flash",
-] as const;
+const MODEL_CANDIDATES = modelCandidatesForDepth("standard");
 
 const BRIDGE_HEADER = "x-onesong-bridge";
 const BRIDGE_TOKEN = "onesong-bridge-2026-09";
@@ -133,6 +132,7 @@ type QuestionAskResult =
       store: string;
       mode: "default" | "custom";
       teachers: string[];
+      depth: AskDepth;
       /** True when markdown files were bundled under corpus/. */
       corpusAvailable: boolean;
     }
@@ -386,6 +386,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const mode = body.mode === "custom" ? "custom" : "default";
+  const depth = parseAskDepth(body);
   const rawTeachers = Array.isArray(body.teachers)
     ? body.teachers.filter((t): t is string => typeof t === "string")
     : [];
@@ -412,7 +413,8 @@ export async function POST(request: Request): Promise<Response> {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
   let lastError = "All models failed.";
-  for (const model of MODEL_CANDIDATES) {
+  const models = depth === "deep" ? modelCandidatesForDepth("deep") : MODEL_CANDIDATES;
+  for (const model of models) {
     try {
       const fileSearch: Record<string, unknown> = {
         fileSearchStoreNames: [FILE_SEARCH_STORE],
@@ -421,23 +423,27 @@ export async function POST(request: Request): Promise<Response> {
         fileSearch.metadataFilter = metadataFilter;
       }
 
-      const citationNudge = citationNudgeForAsk(mode, teachers);
+      const citationNudge = citationNudgeForAsk(mode, teachers, depth);
       let draft = await generateMergedAsk(
         ai,
         model,
         `${question}
 
 (${citationNudge})`,
-        buildSystemPrompt(mode, teachers),
+        buildSystemPrompt(mode, teachers, { depth }),
         fileSearch,
       );
 
-      // Default / Custom ≥3: if merged cites have fewer than 3 distinct surnames, rewrite once.
-      // Custom 1–2 is exempt. Never invent citations if the rewrite still falls short.
-      if (shouldRetryForThreeTeachers(mode, teachers, draft.merged)) {
+      // Standard Default / Custom ≥3: rewrite once if <3 distinct surnames.
+      // Deep Default / Custom ≥5: rewrite once if <5 distinct surnames.
+      // Narrow Custom (standard 1–2 / deep <5) is exempt. Never invent citations if the rewrite still falls short.
+      if (shouldRetryForMinTeachers(mode, teachers, draft.merged, depth)) {
         try {
-          const rewriteNudge = threeTeacherRewriteNudge(
+          const rewriteNudge = rewriteNudgeForAsk(
             uniqueTeacherSurnames(draft.merged),
+            mode,
+            teachers,
+            depth,
           );
           const retry = await generateMergedAsk(
             ai,
@@ -448,7 +454,7 @@ export async function POST(request: Request): Promise<Response> {
 
 Previous draft (incomplete — too few distinct teacher surnames):
 ${draft.rawAnswer}`,
-            buildSystemPrompt(mode, teachers, { rewrite: true }),
+            buildSystemPrompt(mode, teachers, { rewrite: true, depth }),
             fileSearch,
           );
           if (
@@ -470,7 +476,7 @@ ${draft.rawAnswer}`,
             };
           }
         } catch {
-          // Keep the first draft; do not invent a third teacher.
+          // Keep the first draft; do not invent missing teachers.
         }
       }
 
@@ -496,6 +502,7 @@ ${draft.rawAnswer}`,
           store: FILE_SEARCH_STORE,
           mode,
           teachers,
+          depth,
           corpusAvailable: corpus.length > 0,
         },
         200,

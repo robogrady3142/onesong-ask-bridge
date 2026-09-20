@@ -3,9 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "test": "node --experimental-strip-types --test lib/*.test.ts"
+    "test": "tsx --test lib/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.22.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
   }
 }
