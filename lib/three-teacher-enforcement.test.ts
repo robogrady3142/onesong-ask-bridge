@@ -12,6 +12,7 @@ import {
   THREE_TEACHER_REWRITE_SYSTEM,
   answerLengthInstruction,
   citationNudgeForAsk,
+  customDeepRewriteSystem,
   mergeRetrievedTextByFile,
   modelCandidatesForDepth,
   parseAskDepth,
@@ -231,15 +232,19 @@ test("parseAskDepth: omitted / standard stay standard; depth deep or deepDive tr
 });
 
 const FIVE = ["Aurobindo", "Aivanhov", "Gurdjieff", "Tweedie", "Steiner"];
+const TWO = FIVE.slice(0, 2);
 const FOUR = FIVE.slice(0, 4);
+const SEVEN = [...FIVE, "Rumi", "Ramdas"];
 
-test("requiredMinDistinctTeachers: standard 3 / deep 5; Custom exempt below the min", () => {
+test("requiredMinDistinctTeachers: standard 3 / deep default 5; deep custom = selected count", () => {
   assert.equal(requiredMinDistinctTeachers("default", [], "standard"), 3);
   assert.equal(requiredMinDistinctTeachers("default", [], "deep"), 5);
   assert.equal(requiredMinDistinctTeachers("custom", ["Aurobindo"], "standard"), 0);
-  assert.equal(requiredMinDistinctTeachers("custom", ["Aurobindo"], "deep"), 0);
-  assert.equal(requiredMinDistinctTeachers("custom", FOUR, "deep"), 0);
+  assert.equal(requiredMinDistinctTeachers("custom", ["Aurobindo"], "deep"), 1);
+  assert.equal(requiredMinDistinctTeachers("custom", TWO, "deep"), 2);
+  assert.equal(requiredMinDistinctTeachers("custom", FOUR, "deep"), 4);
   assert.equal(requiredMinDistinctTeachers("custom", FIVE, "deep"), 5);
+  assert.equal(requiredMinDistinctTeachers("custom", SEVEN, "deep"), 7);
   assert.equal(
     requiredMinDistinctTeachers("custom", ["Aurobindo", "Aivanhov", "Gurdjieff"], "standard"),
     3,
@@ -263,6 +268,23 @@ test("shouldRetryForMinTeachers: deep Default retries below 5 surnames", () => {
   );
   assert.equal(
     shouldRetryForMinTeachers("custom", FOUR, [{ teacher: "Aurobindo" }], "deep"),
+    true,
+  );
+  assert.equal(
+    shouldRetryForMinTeachers("custom", TWO, [{ teacher: "Aurobindo" }], "deep"),
+    true,
+  );
+  assert.equal(
+    shouldRetryForMinTeachers(
+      "custom",
+      TWO,
+      [{ teacher: "Aurobindo" }, { teacher: "Aivanhov" }],
+      "deep",
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRetryForMinTeachers("custom", FOUR, four, "deep"),
     false,
   );
 });
@@ -290,14 +312,18 @@ test("deep citation nudge requires five teachers and ~1000 words when applicable
     citationNudgeForAsk("default", [], "deep"),
     DEEP_FIVE_TEACHER_CITATION_NUDGE,
   );
-  assert.equal(
-    citationNudgeForAsk("custom", FIVE, "deep"),
-    DEEP_FIVE_TEACHER_CITATION_NUDGE,
-  );
-  assert.equal(
-    citationNudgeForAsk("custom", FOUR, "deep"),
-    DEEP_NARROW_TEACHER_CITATION_NUDGE,
-  );
+  const fiveCustom = citationNudgeForAsk("custom", FIVE, "deep");
+  assert.match(fiveCustom, /1000–1400/);
+  assert.match(fiveCustom, /all 5 selected teacher/);
+  assert.match(fiveCustom, /Cite only within the selection/);
+  assert.doesNotMatch(fiveCustom, /five DIFFERENT/i);
+  const fourCustom = citationNudgeForAsk("custom", FOUR, "deep");
+  assert.match(fourCustom, /1000–1400/);
+  assert.match(fourCustom, /all 4 selected teacher/);
+  assert.doesNotMatch(fourCustom, /five DIFFERENT/i);
+  const twoCustom = citationNudgeForAsk("custom", TWO, "deep");
+  assert.match(twoCustom, /all 2 selected teacher/);
+  assert.doesNotMatch(twoCustom, /five DIFFERENT/i);
   assert.match(DEEP_FIVE_TEACHER_CITATION_NUDGE, /1000–1400/);
   assert.match(DEEP_FIVE_TEACHER_CITATION_NUDGE, /five DIFFERENT teachers/i);
   assert.match(DEEP_NARROW_TEACHER_CITATION_NUDGE, /1000–1400/);
@@ -321,15 +347,27 @@ test("deep author rule and rewrite nudge: five surnames, no invented cites", () 
   assert.match(answerLengthInstruction("standard"), /350–500/);
 });
 
-test("deep Custom with fewer than 5 selected stays inside the selection", () => {
+test("deep Custom requires the selected count and stays inside the selection", () => {
   const rule = teacherAuthorRule("custom", FOUR, "deep");
-  assert.match(rule, /selected only 4 teacher/);
+  assert.match(rule, /selected 4 teacher/);
+  assert.match(rule, /all 4 selected teachers/);
   assert.match(rule, /do not invent authors outside that selection/i);
   assert.doesNotMatch(rule, /five DIFFERENT/i);
+  const twoRule = teacherAuthorRule("custom", TWO, "deep");
+  assert.match(twoRule, /all 2 selected teachers/);
+  assert.doesNotMatch(twoRule, /five DIFFERENT/i);
+  const sevenRule = teacherAuthorRule("custom", SEVEN, "deep");
+  assert.match(sevenRule, /all 7 selected teachers/);
+  assert.doesNotMatch(sevenRule, /five DIFFERENT/i);
   assert.equal(
     rewriteSystemForAsk("custom", FOUR, "deep"),
-    THREE_TEACHER_REWRITE_SYSTEM,
+    customDeepRewriteSystem(["Aurobindo", "Aivanhov", "Gurdjieff", "Tweedie"]),
   );
+  const rewrite = rewriteNudgeForAsk(["Aurobindo"], "custom", FOUR, "deep");
+  assert.match(rewrite, /all 4 selected teacher/);
+  assert.match(rewrite, /Cite only within the selection/);
+  assert.doesNotMatch(rewrite, /THREE DIFFERENT/i);
+  assert.doesNotMatch(rewrite, /FIVE DIFFERENT/i);
 });
 
 test("deep prefers gemini-3.5-flash; standard keeps lite first", () => {

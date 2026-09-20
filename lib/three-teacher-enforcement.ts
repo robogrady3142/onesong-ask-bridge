@@ -10,10 +10,12 @@
  *
  * Deep dive (`depth: "deep"` or `deepDive: true`):
  * - Target ~1000–1400 words (at least ~1000).
- * - Default, and Custom with ≥5 selected teachers, must cite at least five
- *   DIFFERENT teachers. Retry once after merge if unique surnames < 5.
- * - Custom with fewer than 5 selected: cite only within the selection
- *   (do not invent teachers). Still aim for 1000+ words. No min-teacher retry.
+ * - Default must cite at least five DIFFERENT teachers. Retry once after
+ *   merge if unique surnames < 5.
+ * - Custom: required distinct teachers = number of selected surnames
+ *   (if they selected 7, require 7). Cite only within the selection — not a
+ *   fixed 5 unless they selected ≥5. Retry once if unique surnames < selected.
+ *   Still aim for 1000+ words. Never invent teachers.
  */
 
 import {
@@ -62,16 +64,21 @@ export function selectedTeacherSurnames(teachers: readonly string[]): string[] {
 /**
  * How many distinct surnames the answer must cite, or 0 if exempt.
  * Default always uses the depth minimum (3 standard / 5 deep).
- * Custom uses that minimum only when the reader selected at least that many.
+ * Custom standard: that minimum only when the reader selected at least 3.
+ * Custom deep: the number of distinct selected surnames (cite only within
+ * the selection). Not a fixed 5 unless they selected ≥5.
  */
 export function requiredMinDistinctTeachers(
   mode: AskMode,
   selectedTeachers: readonly string[],
   depth: AskDepth = "standard",
 ): number {
-  const min = depth === "deep" ? DEEP_MIN_TEACHERS : STANDARD_MIN_TEACHERS;
-  if (mode === "default") return min;
-  return selectedTeacherSurnames(selectedTeachers).length >= min ? min : 0;
+  if (mode === "default") {
+    return depth === "deep" ? DEEP_MIN_TEACHERS : STANDARD_MIN_TEACHERS;
+  }
+  const selected = selectedTeacherSurnames(selectedTeachers).length;
+  if (depth === "deep") return selected;
+  return selected >= STANDARD_MIN_TEACHERS ? STANDARD_MIN_TEACHERS : 0;
 }
 
 /**
@@ -148,11 +155,23 @@ export function narrowTeacherAuthorRule(uniqueLast: readonly string[]): string {
   return `- The reader selected only ${uniqueLast.length} teacher(s) (${uniqueLast.join(", ")}). Use only those sources. Still use numbered in-text cites [1], [2] as needed — do not invent authors outside that selection.`;
 }
 
+/** Deep Custom: require every selected surname; never invent outside the selection. */
+export function customDeepAuthorRule(uniqueLast: readonly string[]): string {
+  const n = uniqueLast.length;
+  return `- The reader selected ${n} teacher(s) (${uniqueLast.join(", ")}). REQUIRED: draw on all ${n} selected teachers (distinct surnames). Cite only within this selection — do not invent authors outside that selection. Multiple works by one teacher still count as one teacher. The References list must include all ${n} selected teacher last names. Assign each distinct retrieved work a number and cite it in the body as [1], [2], [3], …`;
+}
+
 export function teacherAuthorRule(
   mode: AskMode,
   selectedTeachers: readonly string[],
   depth: AskDepth = "standard",
 ): string {
+  if (mode === "custom" && depth === "deep") {
+    const surnames = selectedTeacherSurnames(selectedTeachers);
+    return surnames.length > 0
+      ? customDeepAuthorRule(surnames)
+      : narrowTeacherAuthorRule(surnames);
+  }
   const min = requiredMinDistinctTeachers(mode, selectedTeachers, depth);
   if (min >= DEEP_MIN_TEACHERS) return FIVE_TEACHER_AUTHOR_RULE;
   if (min >= STANDARD_MIN_TEACHERS) return THREE_TEACHER_AUTHOR_RULE;
@@ -185,15 +204,42 @@ export const THREE_TEACHER_REWRITE_SYSTEM =
 export const FIVE_TEACHER_REWRITE_SYSTEM =
   `REWRITE: The previous draft failed the five-teacher rule. You must cite at least five DIFFERENT teacher surnames from retrieved documents. Multiple works by one teacher still count as one teacher. Do not invent sources. Write ~1000–1400 words.`;
 
+export function deepCustomCitationNudge(uniqueLast: readonly string[]): string {
+  const n = uniqueLast.length;
+  return `Remember: write ~1000–1400 words (at least ~1000; not a short blurb); cite with [1], [2], [3] in the body (required); end with a numbered References list (teacher — work) matching [n]; the app shows it under the answer. REQUIRED: cite all ${n} selected teacher(s) (${uniqueLast.join(", ")}) — distinct surnames. Cite only within the selection. Do not invent teachers outside the selection. Multiple works by one teacher still count as one teacher.`;
+}
+
+export function customDeepRewriteNudge(
+  uniqueSurnames: readonly string[],
+  selectedSurnames: readonly string[],
+): string {
+  const n = selectedSurnames.length;
+  const listed = uniqueSurnames.length
+    ? `The draft used only ${uniqueSurnames.length} distinct surname(s): ${uniqueSurnames.join(", ")}.`
+    : `The draft did not cite ${n} distinct teacher surname(s) from the selection.`;
+  return `REWRITE REQUIRED: ${listed} Cite all ${n} selected teacher(s) (${selectedSurnames.join(", ")}) — distinct last names. Cite only within the selection. Multiple works by one teacher still count as one teacher. Use only retrieved File Search documents — do not invent teachers, works, quotations, or citations. Keep ~1000–1400 words (at least ~1000); numbered [1], [2], [3] in the body; numbered References (teacher last name — work) matching those [n] marks.`;
+}
+
+export function customDeepRewriteSystem(selectedSurnames: readonly string[]): string {
+  const n = selectedSurnames.length;
+  return `REWRITE: The previous draft failed the selected-teacher rule. You must cite all ${n} selected teacher surname(s) (${selectedSurnames.join(", ")}) from retrieved documents. Cite only within the selection. Multiple works by one teacher still count as one teacher. Do not invent sources. Write ~1000–1400 words.`;
+}
+
 export function citationNudgeForAsk(
   mode: AskMode,
   selectedTeachers: readonly string[],
   depth: AskDepth = "standard",
 ): string {
-  const min = requiredMinDistinctTeachers(mode, selectedTeachers, depth);
   if (depth === "deep") {
-    return min > 0 ? DEEP_FIVE_TEACHER_CITATION_NUDGE : DEEP_NARROW_TEACHER_CITATION_NUDGE;
+    if (mode === "custom") {
+      const surnames = selectedTeacherSurnames(selectedTeachers);
+      return surnames.length > 0
+        ? deepCustomCitationNudge(surnames)
+        : DEEP_NARROW_TEACHER_CITATION_NUDGE;
+    }
+    return DEEP_FIVE_TEACHER_CITATION_NUDGE;
   }
+  const min = requiredMinDistinctTeachers(mode, selectedTeachers, depth);
   return min > 0 ? THREE_TEACHER_CITATION_NUDGE : NARROW_TEACHER_CITATION_NUDGE;
 }
 
@@ -203,6 +249,12 @@ export function rewriteNudgeForAsk(
   selectedTeachers: readonly string[],
   depth: AskDepth = "standard",
 ): string {
+  if (mode === "custom" && depth === "deep") {
+    return customDeepRewriteNudge(
+      uniqueSurnames,
+      selectedTeacherSurnames(selectedTeachers),
+    );
+  }
   const min = requiredMinDistinctTeachers(mode, selectedTeachers, depth);
   return min >= DEEP_MIN_TEACHERS
     ? fiveTeacherRewriteNudge(uniqueSurnames)
@@ -214,6 +266,9 @@ export function rewriteSystemForAsk(
   selectedTeachers: readonly string[],
   depth: AskDepth = "standard",
 ): string {
+  if (mode === "custom" && depth === "deep") {
+    return customDeepRewriteSystem(selectedTeacherSurnames(selectedTeachers));
+  }
   const min = requiredMinDistinctTeachers(mode, selectedTeachers, depth);
   return min >= DEEP_MIN_TEACHERS
     ? FIVE_TEACHER_REWRITE_SYSTEM

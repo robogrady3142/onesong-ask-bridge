@@ -13,7 +13,7 @@ Production URL: `https://onesong-ask-bridge.vercel.app` (do not change onesong.g
 
 Standard Ask is unchanged: ~350–500 words; Default (and Custom with ≥3 selected teachers) must cite at least three different teacher surnames.
 
-Deep dive aims for ~1000–1400 words. Default, and Custom with ≥5 selected teachers, must cite at least five different teacher surnames (retry once after merge if short; never invent citations). Custom with fewer than five selected stays inside that selection. Deep prefers `gemini-3.5-flash` (flash-lite fallback). Citation format is unchanged: `[1][2]…` in the body plus a trailing References block the server strips/merges.
+Deep dive aims for ~1000–1400 words. Default must cite at least five different teacher surnames (retry once after merge if short; never invent citations). Custom deep requires one distinct surname per selected teacher (if they selected 7, require 7) and cites only within that selection — not a fixed 5 unless they selected ≥5. Deep prefers `gemini-3.5-flash` (flash-lite fallback). Citation format is unchanged: `[1][2]…` in the body plus a trailing References block the server strips/merges.
 
 ## Citation passage context
 
