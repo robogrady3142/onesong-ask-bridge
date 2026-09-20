@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mergeCitations } from "./question-citations.ts";
 import {
+  DEEP_FIVE_TEACHER_CITATION_NUDGE,
+  DEEP_NARROW_TEACHER_CITATION_NUDGE,
+  FIVE_TEACHER_AUTHOR_RULE,
+  FIVE_TEACHER_REWRITE_SYSTEM,
   NARROW_TEACHER_CITATION_NUDGE,
   THREE_TEACHER_AUTHOR_RULE,
   THREE_TEACHER_CITATION_NUDGE,
   THREE_TEACHER_REWRITE_SYSTEM,
+  answerLengthInstruction,
   citationNudgeForAsk,
   mergeRetrievedTextByFile,
+  modelCandidatesForDepth,
+  parseAskDepth,
+  requiredMinDistinctTeachers,
   requiresThreeDistinctTeachers,
+  rewriteNudgeForAsk,
+  rewriteSystemForAsk,
   shouldKeepRewrite,
+  shouldRetryForMinTeachers,
   shouldRetryForThreeTeachers,
+  teacherAuthorRule,
   teacherSurname,
   threeTeacherRewriteNudge,
   uniqueTeacherSurnames,
@@ -205,4 +217,128 @@ test("mergeRetrievedTextByFile keeps File Search grounding from both attempts", 
   const merged = mergeRetrievedTextByFile(first, second);
   assert.equal(merged.get("aurobindo/life.md"), "a longer retrieved chunk");
   assert.equal(merged.get("aivanhov/yoga.md"), "nutrition");
+});
+
+test("parseAskDepth: omitted / standard stay standard; depth deep or deepDive true is deep", () => {
+  assert.equal(parseAskDepth({}), "standard");
+  assert.equal(parseAskDepth({ depth: "standard" }), "standard");
+  assert.equal(parseAskDepth({ depth: "deep" }), "deep");
+  assert.equal(parseAskDepth({ deepDive: true }), "deep");
+  assert.equal(parseAskDepth({ deepDive: false }), "standard");
+  assert.equal(parseAskDepth({ depth: "standard", deepDive: true }), "standard");
+  assert.equal(parseAskDepth({ depth: "other", deepDive: true }), "deep");
+  assert.equal(parseAskDepth({ depth: "other" }), "standard");
+});
+
+const FIVE = ["Aurobindo", "Aivanhov", "Gurdjieff", "Tweedie", "Steiner"];
+const FOUR = FIVE.slice(0, 4);
+
+test("requiredMinDistinctTeachers: standard 3 / deep 5; Custom exempt below the min", () => {
+  assert.equal(requiredMinDistinctTeachers("default", [], "standard"), 3);
+  assert.equal(requiredMinDistinctTeachers("default", [], "deep"), 5);
+  assert.equal(requiredMinDistinctTeachers("custom", ["Aurobindo"], "standard"), 0);
+  assert.equal(requiredMinDistinctTeachers("custom", ["Aurobindo"], "deep"), 0);
+  assert.equal(requiredMinDistinctTeachers("custom", FOUR, "deep"), 0);
+  assert.equal(requiredMinDistinctTeachers("custom", FIVE, "deep"), 5);
+  assert.equal(
+    requiredMinDistinctTeachers("custom", ["Aurobindo", "Aivanhov", "Gurdjieff"], "standard"),
+    3,
+  );
+});
+
+test("shouldRetryForMinTeachers: deep Default retries below 5 surnames", () => {
+  const four = [
+    { teacher: "Aurobindo" },
+    { teacher: "Aivanhov" },
+    { teacher: "Gurdjieff" },
+    { teacher: "Tweedie" },
+  ];
+  const five = [...four, { teacher: "Steiner" }];
+  assert.equal(shouldRetryForMinTeachers("default", [], four, "deep"), true);
+  assert.equal(shouldRetryForMinTeachers("default", [], five, "deep"), false);
+  assert.equal(shouldRetryForMinTeachers("default", [], four, "standard"), false);
+  assert.equal(
+    shouldRetryForMinTeachers("custom", FIVE, four, "deep"),
+    true,
+  );
+  assert.equal(
+    shouldRetryForMinTeachers("custom", FOUR, [{ teacher: "Aurobindo" }], "deep"),
+    false,
+  );
+});
+
+test("standard citation nudge is unchanged when depth is omitted or standard", () => {
+  assert.equal(citationNudgeForAsk("default", []), THREE_TEACHER_CITATION_NUDGE);
+  assert.equal(
+    citationNudgeForAsk("default", [], "standard"),
+    THREE_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", ["Aurobindo"]),
+    NARROW_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", ["Aurobindo"], "standard"),
+    NARROW_TEACHER_CITATION_NUDGE,
+  );
+  assert.doesNotMatch(citationNudgeForAsk("default", []), /1000/);
+  assert.doesNotMatch(citationNudgeForAsk("default", [], "standard"), /five DIFFERENT/i);
+});
+
+test("deep citation nudge requires five teachers and ~1000 words when applicable", () => {
+  assert.equal(
+    citationNudgeForAsk("default", [], "deep"),
+    DEEP_FIVE_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", FIVE, "deep"),
+    DEEP_FIVE_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", FOUR, "deep"),
+    DEEP_NARROW_TEACHER_CITATION_NUDGE,
+  );
+  assert.match(DEEP_FIVE_TEACHER_CITATION_NUDGE, /1000–1400/);
+  assert.match(DEEP_FIVE_TEACHER_CITATION_NUDGE, /five DIFFERENT teachers/i);
+  assert.match(DEEP_NARROW_TEACHER_CITATION_NUDGE, /1000–1400/);
+  assert.doesNotMatch(DEEP_NARROW_TEACHER_CITATION_NUDGE, /five DIFFERENT/i);
+  assert.match(DEEP_NARROW_TEACHER_CITATION_NUDGE, /Do not invent teachers/);
+});
+
+test("deep author rule and rewrite nudge: five surnames, no invented cites", () => {
+  assert.equal(teacherAuthorRule("default", [], "deep"), FIVE_TEACHER_AUTHOR_RULE);
+  assert.equal(teacherAuthorRule("default", [], "standard"), THREE_TEACHER_AUTHOR_RULE);
+  assert.match(FIVE_TEACHER_AUTHOR_RULE, /five DIFFERENT teachers/i);
+  assert.match(FIVE_TEACHER_AUTHOR_RULE, /four teachers, not five/);
+  const nudge = rewriteNudgeForAsk(["Aurobindo", "Aivanhov"], "default", [], "deep");
+  assert.match(nudge, /FIVE DIFFERENT teachers/i);
+  assert.match(nudge, /1000–1400/);
+  assert.match(nudge, /do not invent/i);
+  assert.equal(rewriteSystemForAsk("default", [], "deep"), FIVE_TEACHER_REWRITE_SYSTEM);
+  assert.equal(rewriteSystemForAsk("default", [], "standard"), THREE_TEACHER_REWRITE_SYSTEM);
+  assert.match(FIVE_TEACHER_REWRITE_SYSTEM, /Do not invent sources/);
+  assert.match(answerLengthInstruction("deep"), /1000–1400/);
+  assert.match(answerLengthInstruction("standard"), /350–500/);
+});
+
+test("deep Custom with fewer than 5 selected stays inside the selection", () => {
+  const rule = teacherAuthorRule("custom", FOUR, "deep");
+  assert.match(rule, /selected only 4 teacher/);
+  assert.match(rule, /do not invent authors outside that selection/i);
+  assert.doesNotMatch(rule, /five DIFFERENT/i);
+  assert.equal(
+    rewriteSystemForAsk("custom", FOUR, "deep"),
+    THREE_TEACHER_REWRITE_SYSTEM,
+  );
+});
+
+test("deep prefers gemini-3.5-flash; standard keeps lite first", () => {
+  assert.deepEqual(modelCandidatesForDepth("standard"), [
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+  ]);
+  assert.deepEqual(modelCandidatesForDepth("deep"), [
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+  ]);
 });

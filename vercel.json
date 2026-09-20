@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/onesong-question.ts": {
-      "maxDuration": 60,
+      "maxDuration": 180,
       "memory": 1024,
       "includeFiles": "corpus/**"
     }
