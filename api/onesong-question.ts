@@ -211,91 +211,221 @@ function buildTeacherFilter(teachers: string[]): string | undefined {
   return teachers.map((t) => `teacher="${t}"`).join(" OR ");
 }
 
-/** Drop a model-emitted References block so it does not duplicate the app citation list. */
-export function stripModelReferencesSection(answer: string): string {
-  let out = answer.replace(/\n+#{0,3}\s*References?\s*\n(?:[ \t]*\d+\.\s+[^\n]*\n?)+\s*$/i, "");
-  out = out.replace(/\n+#{0,3}\s*References?\s*\n(?:[ \t]*\d+\.\s+[^\n]*\n?)+/gi, "\n");
-  return out.trimEnd();
+/**
+ * Standalone bibliography heading. Plural/Sources/Bibliography only — never the
+ * prose word "reference" at the start of a line, which used to eat following
+ * numbered body lines (and their [n] cites).
+ */
+const REFERENCES_HEADING_LINE =
+  /^#{0,3}\s*(?:References|Sources|Bibliography)\s*[:.]?\s*$/i;
+
+/** `[1]: Teacher — work` / `[1] Teacher — work` / `1. Teacher — work`. */
+function isBibEntryLine(line: string): boolean {
+  const t = line;
+  if (/^[ \t]*\[\d+\]\s*:/.test(t)) return true;
+  if (/^[ \t]*\[\d+\]\s+\S/.test(t)) return true;
+  if (/^[ \t]*\d+[.)]\s+\S/.test(t) && /\s+[—–-]\s+/.test(t)) return true;
+  return false;
 }
 
-/** If the model omitted [n] cites, insert [i] after the first mention of each citation teacher (order matches the app list). */
-function ensureInlineNumberedCites(answer: string, citations: QuestionCitation[]): string {
-  if (/\[\d+\]/.test(answer)) return answer;
+/** After an explicit References heading, classic `1. row` entries are bibliography. */
+function isHeadingRefEntryLine(line: string): boolean {
+  return isBibEntryLine(line) || /^[ \t]*\d+[.)]\s+\S/.test(line);
+}
+
+function parseRefEntry(line: string): QuestionCitation | undefined {
+  const body =
+    line.match(/^[ \t]*\[\d+\]\s*:?\s+(.+?)\s*$/)?.[1] ??
+    line.match(/^[ \t]*\d+[.)]\s+(.+?)\s*$/)?.[1];
+  if (!body) return undefined;
+  const parts = body.split(/\s+[—–-]\s+/);
+  if (parts.length >= 2) {
+    const teacherRaw = parts[0].trim();
+    const rest = parts.slice(1).join(" — ").trim();
+    return {
+      teacher: displayTeacherName(teacherRaw) ?? teacherRaw,
+      file: rest || undefined,
+    };
+  }
+  return { file: body };
+}
+
+function lineStartIndex(text: string, index: number): number {
+  if (index <= 0) return 0;
+  const fromNewline = text.lastIndexOf("\n", index - 1);
+  return fromNewline === -1 ? 0 : fromNewline + 1;
+}
+
+function consumeRefEntries(
+  text: string,
+  from: number,
+  lineTest: (line: string) => boolean,
+): { end: number; citations: QuestionCitation[] } {
+  const lead = text.slice(from).match(/^\n*/)?.[0].length ?? 0;
+  let pos = from + lead;
+  const citations: QuestionCitation[] = [];
+  while (pos < text.length) {
+    const nl = text.indexOf("\n", pos);
+    const lineEnd = nl === -1 ? text.length : nl;
+    const line = text.slice(pos, lineEnd);
+    if (line.trim() === "") {
+      const nextStart = lineEnd + 1;
+      if (nextStart > text.length) break;
+      const nextNl = text.indexOf("\n", nextStart);
+      const nextLine = text.slice(nextStart, nextNl === -1 ? text.length : nextNl);
+      if (!lineTest(nextLine)) break;
+      pos = nextStart;
+      continue;
+    }
+    if (!lineTest(line)) break;
+    const cite = parseRefEntry(line);
+    if (cite) citations.push(cite);
+    pos = nl === -1 ? text.length : lineEnd + 1;
+  }
+  return { end: pos, citations };
+}
+
+function findLastReferencesHeading(
+  answer: string,
+): { headingStart: number; afterHeading: number } | null {
+  const re = /(^|\n)(#{0,3}\s*(?:References|Sources|Bibliography)\s*[:.]?\s*)(?=\n|$)/gi;
+  let last: RegExpExecArray | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(answer)) !== null) {
+    const heading = match[2] ?? "";
+    if (!REFERENCES_HEADING_LINE.test(heading)) continue;
+    last = match;
+  }
+  if (!last) return null;
+  const prefix = last[1] ?? "";
+  return {
+    headingStart: last.index + prefix.length,
+    afterHeading: last.index + last[0].length,
+  };
+}
+
+function findTrailingBareBibliography(
+  answer: string,
+): { start: number; end: number; citations: QuestionCitation[] } | null {
+  const trimmedEnd = answer.length - (answer.length - answer.trimEnd().length);
+  const lines: { start: number; end: number; text: string }[] = [];
+  let pos = 0;
+  while (pos <= trimmedEnd) {
+    const nl = answer.indexOf("\n", pos);
+    const end = nl === -1 || nl > trimmedEnd ? trimmedEnd : nl;
+    lines.push({ start: pos, end, text: answer.slice(pos, end) });
+    if (nl === -1 || nl >= trimmedEnd) break;
+    pos = nl + 1;
+  }
+  let i = lines.length - 1;
+  while (i >= 0 && lines[i].text.trim() === "") i--;
+  const lastBib = i;
+  while (i >= 0 && isBibEntryLine(lines[i].text)) i--;
+  const firstBib = i + 1;
+  if (firstBib > lastBib) return null;
+  const prev = firstBib > 0 ? lines[firstBib - 1].text : "";
+  const onlyBracketCites = lines.slice(firstBib, lastBib + 1).every(
+    (line) =>
+      line.text.trim() === "" || /^[ \t]*\[\d+\]\s*:?\s+\S/.test(line.text),
+  );
+  // `1. Teacher — work` needs a blank line so numbered prose lists stay put.
+  // `[n]` / `[n]:` rows are bibliography even when flush against the last paragraph
+  // (and `[n]:` would otherwise become a markdown link definition that hides body [n]).
+  if (firstBib > 0 && prev.trim() !== "" && !onlyBracketCites) return null;
+  const citations: QuestionCitation[] = [];
+  for (let j = firstBib; j <= lastBib; j++) {
+    const cite = parseRefEntry(lines[j].text);
+    if (cite) citations.push(cite);
+  }
+  if (!citations.length) return null;
+  return {
+    start: lines[firstBib].start,
+    end: lines[lastBib].end,
+    citations,
+  };
+}
+
+function findReferencesBlock(answer: string): {
+  start: number;
+  end: number;
+  citations: QuestionCitation[];
+} | null {
+  const heading = findLastReferencesHeading(answer);
+  if (heading) {
+    const taken = consumeRefEntries(answer, heading.afterHeading, isHeadingRefEntryLine);
+    if (taken.citations.length) {
+      return {
+        start: lineStartIndex(answer, heading.headingStart),
+        end: taken.end,
+        citations: taken.citations,
+      };
+    }
+  }
+  return findTrailingBareBibliography(answer);
+}
+
+/** Drop a model-emitted References block so it does not duplicate the app citation list. */
+export function stripModelReferencesSection(answer: string): string {
+  return takeModelReferencesSection(answer).answer;
+}
+
+function teacherNameVariants(teacher?: string): string[] {
+  if (!teacher?.trim()) return [];
+  const raw = teacher.trim();
+  const displayed = displayTeacherName(raw) ?? raw;
+  const last = displayed.split(/\s+/).filter(Boolean).pop() ?? displayed;
+  const variants = [displayed, last, raw];
+  if (/dougan/i.test(`${displayed} ${raw}`)) variants.push("Dougan", "Abdullah");
+  if (/sanai/i.test(displayed) || /sinai/i.test(raw)) variants.push("Sanai", "Sinai");
+  return [...new Set(variants.filter((name) => name.trim()))];
+}
+
+function proseHasCite(answer: string, n: number): boolean {
+  const mark = new RegExp(`\\[${n}\\]`);
+  for (const line of answer.split("\n")) {
+    if (REFERENCES_HEADING_LINE.test(line) || isBibEntryLine(line)) continue;
+    if (mark.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * If the model omitted [n] in the prose, insert [i] after the first mention of
+ * each citation teacher (order matches the app list). Leftover bibliography
+ * `[n]` lines do not count as in-body cites.
+ */
+export function ensureInlineNumberedCites(
+  answer: string,
+  citations: QuestionCitation[],
+): string {
   let out = answer;
   citations.forEach((c, idx) => {
     const n = idx + 1;
-    const teacher = (c.teacher || "").trim();
-    if (!teacher) return;
-    const escaped = teacher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b(?!\\s*\\[\\d+\\])`, "i");
-    if (!re.test(out)) return;
-    out = out.replace(re, (m) => `${m} [${n}]`);
+    if (proseHasCite(out, n)) return;
+    for (const name of teacherNameVariants(c.teacher)) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b${escaped}\\b(?!\\s*\\[\\d+\\])`, "i");
+      if (!re.test(out)) continue;
+      out = out.replace(re, (m) => `${m} [${n}]`);
+      break;
+    }
   });
   return out;
 }
-
 
 /** Parse a trailing model References block into citation rows (then strip it from the answer). */
 export function takeModelReferencesSection(answer: string): {
   answer: string;
   citations: QuestionCitation[];
 } {
-  const citations: QuestionCitation[] = [];
-  const re =
-    /\n+#{0,3}\s*References?\s*\n((?:[ \t]*\d+\.\s+[^\n]*\n?)+)\s*$/i;
-  const m = answer.match(re);
-  if (!m) {
-    // Also catch mid-answer References blocks the model still emits
-    const re2 =
-      /\n+#{0,3}\s*References?\s*\n((?:[ \t]*\d+\.\s+[^\n]*\n?)+)/gi;
-    let last: RegExpExecArray | null = null;
-    let match: RegExpExecArray | null;
-    while ((match = re2.exec(answer)) !== null) last = match;
-    if (!last) {
-      return { answer: answer.trimEnd(), citations };
-    }
-    const block = last[1];
-    for (const line of block.split("\n")) {
-      const lm = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
-      if (!lm) continue;
-      const body = lm[1];
-      const parts = body.split(/\s+[—–-]\s+/); // em dash / en dash / hyphen
-      if (parts.length >= 2) {
-        const teacherRaw = parts[0].trim();
-        const rest = parts.slice(1).join(" — ").trim();
-        citations.push({
-          teacher: displayTeacherName(teacherRaw) ?? teacherRaw,
-          file: rest || undefined,
-        });
-      } else {
-        citations.push({ file: body });
-      }
-    }
-    const cleaned = (answer.slice(0, last.index) + answer.slice(last.index + last[0].length))
-      .replace(/\n{3,}/g, "\n\n")
-      .trimEnd();
-    return { answer: cleaned, citations };
+  const block = findReferencesBlock(answer);
+  if (!block) {
+    return { answer: answer.trimEnd(), citations: [] };
   }
-
-  const block = m[1];
-  for (const line of block.split("\n")) {
-    const lm = line.match(/^\s*\d+\.\s+(.+?)\s*$/);
-    if (!lm) continue;
-    const body = lm[1];
-    const parts = body.split(/\s+[—–-]\s+/);
-    if (parts.length >= 2) {
-      const teacherRaw = parts[0].trim();
-      const rest = parts.slice(1).join(" — ").trim();
-      citations.push({
-        teacher: displayTeacherName(teacherRaw) ?? teacherRaw,
-        file: rest || undefined,
-      });
-    } else {
-      citations.push({ file: body });
-    }
-  }
-  const cleaned = answer.replace(re, "").replace(/\n{3,}/g, "\n\n").trimEnd();
-  return { answer: cleaned, citations };
+  const cleaned = `${answer.slice(0, block.start)}${answer.slice(block.end)}`
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+  return { answer: cleaned, citations: block.citations };
 }
 
 type MergedAskDraft = {
