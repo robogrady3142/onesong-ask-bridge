@@ -1,12 +1,12 @@
 /**
  * Ask three-teacher enforcement (distinct surnames).
  *
- * Default, and Custom with ≥3 selected teachers, must cite at least three
- * DIFFERENT teachers. Three works from one teacher do not count.
- * Custom with 1–2 teachers is exempt (do not invent a third author).
- *
- * Never invent citations; a retry only asks the model to rewrite from
- * retrieved File Search documents.
+ * Same contract as solintra Ask (PR #18 / recovery patch):
+ * - Default, and Custom with ≥3 selected teachers, must cite at least three
+ *   DIFFERENT teachers. Three works from one teacher do not count.
+ * - Custom with 1–2 teachers is exempt (do not invent a third author).
+ * - After mergeCitations, if unique surnames < 3, retry once with a rewrite
+ *   nudge. Never invent citations.
  */
 
 import {
