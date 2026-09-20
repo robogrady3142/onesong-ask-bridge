@@ -15,6 +15,19 @@ import {
   type QuestionCitation,
 } from "../lib/question-citations";
 import { getCorpus } from "../lib/question-md-corpus";
+import {
+  THREE_TEACHER_AUTHOR_RULE,
+  THREE_TEACHER_REWRITE_SYSTEM,
+  citationNudgeForAsk,
+  mergeRetrievedTextByFile,
+  narrowTeacherAuthorRule,
+  requiresThreeDistinctTeachers,
+  selectedTeacherSurnames,
+  shouldKeepRewrite,
+  shouldRetryForThreeTeachers,
+  threeTeacherRewriteNudge,
+  uniqueTeacherSurnames,
+} from "../lib/three-teacher-enforcement";
 
 export const config = {
   runtime: "nodejs",
@@ -44,49 +57,25 @@ const STORE_TEACHER_METADATA = [
 
 type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
 
-/** Surname used when expanding numbered References lines. */
-const TEACHER_LAST_NAME: Record<string, string> = {
-  Abdullah: "Dougan",
-  Aivanhov: "Aivanhov",
-  Nisragadatta: "Nisargadatta",
-  Brahamananda: "Brahmananda",
-  "Irina Tweedie": "Tweedie",
-  "Hazrat Inayat Khan": "Khan",
-  "Ramana Maharshi": "Ramana",
-  Ramdas: "Ramdas",
-  Vivekananda: "Vivekananda",
-  Aurobindo: "Aurobindo",
-  Gurdjieff: "Gurdjieff",
-  "Hakim Sinai": "Sanai",
-  Rumi: "Rumi",
-  Steiner: "Steiner",
-  "Thomas A Kempis": "Kempis",
-};
-
-function lastNameForTeacher(metadata: string): string {
-  return TEACHER_LAST_NAME[metadata] ?? metadata.split(/\s+/).slice(-1)[0] ?? metadata;
-}
-
 /**
  * Build system instruction for Ask.
  * - In-text cites: [1], [2], … in the body only.
  * - Model appends References; server moves that list under the answer (with File Search snippets when available).
- * - Default / Custom with 3+ teachers: at least three different authors.
- * - Custom with 1–2 teachers: cite only within that selection.
+ * - Default / Custom with 3+ teachers: at least three DIFFERENT teachers (distinct surnames); three works from one teacher do not count.
+ * - Custom with 1–2 teachers: cite only within that selection (exempt from the three-teacher retry).
  * - Target length: 350–500 words.
  */
 function buildSystemPrompt(
   mode: "default" | "custom",
   teachers: string[],
+  opts?: { rewrite?: boolean },
 ): string {
-  const lastNames = teachers.map(lastNameForTeacher);
-  const uniqueLast = [...new Set(lastNames)];
-  const minThree =
-    mode === "default" || (mode === "custom" && uniqueLast.length >= 3);
+  const uniqueLast = selectedTeacherSurnames(teachers);
+  const minThree = requiresThreeDistinctTeachers(mode, teachers);
 
   const authorRule = minThree
-    ? `- REQUIRED: Draw on at least three different teachers. Assign each distinct source a number and cite it in the body as [1], [2], [3], …`
-    : `- The reader selected only ${uniqueLast.length} teacher(s) (${uniqueLast.join(", ")}). Use only those sources. Still use numbered in-text cites [1], [2] as needed — do not invent a third author.`;
+    ? THREE_TEACHER_AUTHOR_RULE
+    : narrowTeacherAuthorRule(uniqueLast);
 
   return `You are answering questions for OneSong Question using only the retrieved File Search documents.
 
@@ -99,6 +88,7 @@ CITATION FORMAT (mandatory):
   2. …
 - Every [n] in the body must appear in References, and every References entry must be used at least once in the body.
 - Number distinct retrieved works in the order you first lean on them: first work [1], second [2], third [3]. Keep that numbering stable through the answer.
+- Numbering is per work, not per teacher: two books by Aurobindo are two References rows but still one teacher.
 - Example body fragment: "Self-observation begins in ordinary life [1], and attention must be divided [2], while the heart stays soft [3]."
 - Example References:
   1. Dougan — Forty Days
@@ -118,7 +108,7 @@ ${authorRule}
 - If sources conflict or differ in emphasis, briefly say how they meet or where they diverge.
 - If retrieval is thin, say what you found and what is missing — do not speculate.
 - You are not a therapist, not a medical professional, and not a replacement for a human teacher. If the person is in crisis, urge local professional help. Do not provide methods of harm.
-- Prefer prose.`;
+- Prefer prose.${opts?.rewrite ? `\n\n${THREE_TEACHER_REWRITE_SYSTEM}` : ""}`;
 }
 
 const MODEL_CANDIDATES = [
@@ -308,6 +298,39 @@ export function takeModelReferencesSection(answer: string): {
   return { answer: cleaned, citations };
 }
 
+type MergedAskDraft = {
+  extracted: ReturnType<typeof extractFileSearchCitations>;
+  taken: ReturnType<typeof takeModelReferencesSection>;
+  merged: QuestionCitation[];
+  rawAnswer: string;
+};
+
+async function generateMergedAsk(
+  ai: GoogleGenAI,
+  model: string,
+  contents: string,
+  systemInstruction: string,
+  fileSearch: Record<string, unknown>,
+): Promise<MergedAskDraft> {
+  const response = await ai.models.generateContent({
+    model,
+    contents,
+    config: {
+      systemInstruction,
+      tools: [{ fileSearch }],
+    },
+  });
+  const extracted = extractFileSearchCitations(response);
+  const rawAnswer = (
+    typeof (response as { text?: string }).text === "string"
+      ? (response as { text: string }).text
+      : ""
+  ).trim();
+  const taken = takeModelReferencesSection(rawAnswer);
+  const merged = mergeCitations(extracted.citations, taken.citations);
+  return { extracted, taken, merged, rawAnswer };
+}
+
 function isAuthorized(request: Request): boolean {
   return request.headers.get(BRIDGE_HEADER) === BRIDGE_TOKEN;
 }
@@ -398,35 +421,65 @@ export async function POST(request: Request): Promise<Response> {
         fileSearch.metadataFilter = metadataFilter;
       }
 
-      const citationNudge =
-        mode === "custom" && teachers.length > 0 && teachers.length < 3
-          ? `Remember: write ~350–500 words; cite with [1], [2] in the body for the selected teacher(s) only (required); end with a numbered References list (teacher — work) matching [n]; the app shows it under the answer.`
-          : `Remember: write ~350–500 words; cite with [1], [2], [3] in the body (required); end with a numbered References list (teacher — work) matching [n]; the app shows it under the answer. Use at least three different teachers when available.`;
-      const response = await ai.models.generateContent({
+      const citationNudge = citationNudgeForAsk(mode, teachers);
+      let draft = await generateMergedAsk(
+        ai,
         model,
-        contents: `${question}
+        `${question}
 
 (${citationNudge})`,
-        config: {
-          systemInstruction: buildSystemPrompt(mode, teachers),
-          tools: [{ fileSearch }],
-        },
-      });
+        buildSystemPrompt(mode, teachers),
+        fileSearch,
+      );
 
-      const extracted = extractFileSearchCitations(response);
-      const rawAnswer = (
-        typeof (response as { text?: string }).text === "string"
-          ? (response as { text: string }).text
-          : ""
-      ).trim();
-      const taken = takeModelReferencesSection(rawAnswer);
-      const merged = mergeCitations(extracted.citations, taken.citations);
+      // Default / Custom ≥3: if merged cites have fewer than 3 distinct surnames, rewrite once.
+      // Custom 1–2 is exempt. Never invent citations if the rewrite still falls short.
+      if (shouldRetryForThreeTeachers(mode, teachers, draft.merged)) {
+        try {
+          const rewriteNudge = threeTeacherRewriteNudge(
+            uniqueTeacherSurnames(draft.merged),
+          );
+          const retry = await generateMergedAsk(
+            ai,
+            model,
+            `${question}
+
+(${rewriteNudge})
+
+Previous draft (incomplete — too few distinct teacher surnames):
+${draft.rawAnswer}`,
+            buildSystemPrompt(mode, teachers, { rewrite: true }),
+            fileSearch,
+          );
+          if (
+            shouldKeepRewrite(
+              uniqueTeacherSurnames(draft.merged).length,
+              uniqueTeacherSurnames(retry.merged).length,
+              Boolean(retry.taken.answer),
+            )
+          ) {
+            draft = {
+              ...retry,
+              extracted: {
+                citations: retry.extracted.citations,
+                retrievedTextByFile: mergeRetrievedTextByFile(
+                  draft.extracted.retrievedTextByFile,
+                  retry.extracted.retrievedTextByFile,
+                ),
+              },
+            };
+          }
+        } catch {
+          // Keep the first draft; do not invent a third teacher.
+        }
+      }
+
       const corpus = getCorpus();
-      const citations = expandCitations(merged, {
+      const citations = expandCitations(draft.merged, {
         corpus,
-        retrievedTextByFile: extracted.retrievedTextByFile,
+        retrievedTextByFile: draft.extracted.retrievedTextByFile,
       });
-      const answer = ensureInlineNumberedCites(taken.answer, citations);
+      const answer = ensureInlineNumberedCites(draft.taken.answer, citations);
 
       if (!answer) {
         lastError = `${model}: empty answer`;
