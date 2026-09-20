@@ -66,8 +66,9 @@ type StoreTeacher = (typeof STORE_TEACHER_METADATA)[number];
  * - Standard: Default / Custom with 3+ teachers: at least three DIFFERENT teachers
  *   (distinct surnames); three works from one teacher do not count. ~350–500 words.
  * - Standard Custom with 1–2 teachers: cite only within that selection (exempt from retry).
- * - Deep: ~1000–1400 words. Default / Custom with 5+ teachers: at least five DIFFERENT
- *   teachers; retry once if short. Custom with fewer than 5: cite only within selection.
+ * - Deep: ~1000–1400 words. Default: at least five DIFFERENT teachers; retry
+ *   once if short. Custom: required distinct teachers = selected surname count
+ *   (cite only within the selection; if they selected 7, require 7).
  */
 function buildSystemPrompt(
   mode: "default" | "custom",
@@ -566,8 +567,9 @@ export async function POST(request: Request): Promise<Response> {
       );
 
       // Standard Default / Custom ≥3: rewrite once if <3 distinct surnames.
-      // Deep Default / Custom ≥5: rewrite once if <5 distinct surnames.
-      // Narrow Custom (standard 1–2 / deep <5) is exempt. Never invent citations if the rewrite still falls short.
+      // Deep Default: rewrite once if <5 distinct surnames.
+      // Deep Custom: rewrite once if unique surnames < selected count.
+      // Narrow Custom (standard 1–2) is exempt. Never invent citations if the rewrite still falls short.
       if (shouldRetryForMinTeachers(mode, teachers, draft.merged, depth)) {
         try {
           const rewriteNudge = rewriteNudgeForAsk(
