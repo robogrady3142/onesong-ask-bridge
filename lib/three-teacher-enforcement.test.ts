@@ -22,6 +22,9 @@ test("teacherSurname maps store metadata and Abdullah to last names", () => {
   assert.equal(teacherSurname("Sri Aurobindo"), "Aurobindo");
   assert.equal(teacherSurname("Irina Tweedie"), "Tweedie");
   assert.equal(teacherSurname("Hazrat Inayat Khan"), "Khan");
+  assert.equal(teacherSurname("Nisragadatta"), "Nisargadatta");
+  assert.equal(teacherSurname("Hakim Sinai"), "Sanai");
+  assert.equal(teacherSurname("Ramana Maharshi"), "Ramana");
   assert.equal(teacherSurname(undefined), undefined);
   assert.equal(teacherSurname("  "), undefined);
 });
@@ -35,6 +38,32 @@ test("uniqueTeacherSurnames counts distinct surnames, not distinct works", () =>
   ]);
   assert.deepEqual(surnames, ["Aurobindo", "Aivanhov"]);
   assert.equal(surnames.length, 2);
+});
+
+test("uniqueTeacherSurnames treats Abdullah metadata and Dougan as one teacher", () => {
+  const surnames = uniqueTeacherSurnames([
+    { teacher: "Abdullah" },
+    { teacher: "Dougan" },
+    { teacher: "Abdullah Dougan" },
+  ]);
+  assert.deepEqual(surnames, ["Dougan"]);
+});
+
+test("three works from one teacher still count as one surname", () => {
+  const surnames = uniqueTeacherSurnames([
+    { teacher: "Gurdjieff" },
+    { teacher: "G. I. Gurdjieff" },
+    { teacher: "Gurdjieff" },
+  ]);
+  assert.deepEqual(surnames, ["Gurdjieff"]);
+  assert.equal(
+    shouldRetryForThreeTeachers("default", [], [
+      { teacher: "Gurdjieff" },
+      { teacher: "Gurdjieff" },
+      { teacher: "Gurdjieff" },
+    ]),
+    true,
+  );
 });
 
 test("uniqueTeacherSurnames keeps first-seen display form and ignores blanks", () => {
@@ -137,6 +166,14 @@ test("prompt + citation nudge require DISTINCT surnames, not three works", () =>
   assert.equal(
     citationNudgeForAsk("custom", ["Aurobindo"]),
     NARROW_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", ["Aurobindo", "Aivanhov"]),
+    NARROW_TEACHER_CITATION_NUDGE,
+  );
+  assert.equal(
+    citationNudgeForAsk("custom", ["Aurobindo", "Aivanhov", "Gurdjieff"]),
+    THREE_TEACHER_CITATION_NUDGE,
   );
   assert.doesNotMatch(NARROW_TEACHER_CITATION_NUDGE, /three DIFFERENT/i);
 });
