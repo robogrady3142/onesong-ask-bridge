@@ -8,6 +8,12 @@
  */
 import { GoogleGenAI } from "@google/genai";
 import { expandCitations } from "../lib/citation-passage-context";
+import {
+  displayTeacherName,
+  extractFileSearchCitations,
+  mergeCitations,
+  type QuestionCitation,
+} from "../lib/question-citations";
 import { getCorpus } from "../lib/question-md-corpus";
 
 export const config = {
@@ -130,17 +136,6 @@ const ALLOWED_ORIGINS = [
   "https://otter-otter-silver-falcon.grok.me",
 ] as const;
 
-type QuestionCitation = {
-  teacher?: string;
-  file?: string;
-  snippet?: string;
-  contextBefore?: string;
-  passage?: string;
-  paragraph?: string;
-  contextAfter?: string;
-  limitedContext?: boolean;
-};
-
 type QuestionAskResult =
   | {
       ok: true;
@@ -252,12 +247,6 @@ function ensureInlineNumberedCites(answer: string, citations: QuestionCitation[]
 }
 
 
-function displayTeacherName(raw?: string): string | undefined {
-  if (!raw) return undefined;
-  if (raw === "Abdullah" || /^Abdullah\b/i.test(raw)) return "Dougan";
-  return TEACHER_LAST_NAME[raw] ?? raw;
-}
-
 /** Parse a trailing model References block into citation rows (then strip it from the answer). */
 export function takeModelReferencesSection(answer: string): {
   answer: string;
@@ -320,87 +309,6 @@ export function takeModelReferencesSection(answer: string): {
   const cleaned = answer.replace(re, "").replace(/\n{3,}/g, "\n\n").trimEnd();
   return { answer: cleaned, citations };
 }
-
-/** Prefer File Search grounding (with snippets); fall back to parsed model References. */
-function mergeCitations(
-  grounding: QuestionCitation[],
-  parsed: QuestionCitation[],
-): QuestionCitation[] {
-  if (grounding.length === 0) return parsed;
-  if (parsed.length === 0) return grounding;
-  // Prefer File Search snippets; prefer clean model titles when they are not raw paths.
-  return grounding.map((g, i) => {
-    const byTeacher = parsed.find(
-      (p) => p.teacher && g.teacher && p.teacher.toLowerCase() === g.teacher.toLowerCase(),
-    );
-    const p = byTeacher ?? parsed[i];
-    const cleanTitle =
-      p?.file && !/[\\/]/.test(p.file) ? p.file : undefined;
-    return {
-      teacher: g.teacher || p?.teacher,
-      file: cleanTitle || g.file || p?.file,
-      snippet: g.snippet,
-    };
-  });
-}
-
-
-function extractCitations(response: unknown): {
-  citations: QuestionCitation[];
-  retrievedTextByFile: Map<string, string>;
-} {
-  const citations: QuestionCitation[] = [];
-  const retrievedTextByFile = new Map<string, string>();
-  const seenFile = new Set<string>();
-  try {
-    const candidates =
-      (response as { candidates?: Array<{ grounding_metadata?: unknown; groundingMetadata?: unknown }> })
-        ?.candidates ?? [];
-    for (const cand of candidates) {
-      const gm =
-        (cand as { groundingMetadata?: { groundingChunks?: unknown[] } }).groundingMetadata ??
-        (cand as { grounding_metadata?: { grounding_chunks?: unknown[] } }).grounding_metadata;
-      const chunks =
-        (gm as { groundingChunks?: unknown[] })?.groundingChunks ??
-        (gm as { grounding_chunks?: unknown[] })?.grounding_chunks ??
-        [];
-      for (const chunk of chunks) {
-        const rc =
-          (chunk as { retrievedContext?: Record<string, unknown> }).retrievedContext ??
-          (chunk as { retrieved_context?: Record<string, unknown> }).retrieved_context;
-        if (!rc) continue;
-        const metaList =
-          (rc.customMetadata as Array<{ key?: string; stringValue?: string; string_value?: string }>) ??
-          (rc.custom_metadata as Array<{ key?: string; stringValue?: string; string_value?: string }>) ??
-          [];
-        const meta: Record<string, string> = {};
-        for (const m of metaList) {
-          if (m?.key) meta[m.key] = m.stringValue ?? m.string_value ?? "";
-        }
-        const file = String(rc.title ?? meta.source_path ?? "") || undefined;
-        const fileKey = (file ?? "").toLowerCase();
-        const fullText = String(rc.text ?? "");
-        if (fileKey && fullText) {
-          const prev = retrievedTextByFile.get(fileKey);
-          retrievedTextByFile.set(fileKey, prev ? `${prev}\n\n${fullText}` : fullText);
-        }
-        if (fileKey && seenFile.has(fileKey)) continue;
-        if (fileKey) seenFile.add(fileKey);
-        const text = fullText.slice(0, 400);
-        citations.push({
-          teacher: displayTeacherName(meta.teacher || undefined),
-          file,
-          snippet: text || undefined,
-        });
-      }
-    }
-  } catch {
-    // Citations are best-effort; answer text still returns.
-  }
-  return { citations, retrievedTextByFile };
-}
-
-
 
 function isAuthorized(request: Request): boolean {
   return request.headers.get(BRIDGE_HEADER) === BRIDGE_TOKEN;
@@ -507,7 +415,7 @@ export async function POST(request: Request): Promise<Response> {
         },
       });
 
-      const extracted = extractCitations(response);
+      const extracted = extractFileSearchCitations(response);
       const rawAnswer = (
         typeof (response as { text?: string }).text === "string"
           ? (response as { text: string }).text

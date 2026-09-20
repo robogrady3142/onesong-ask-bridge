@@ -6,8 +6,9 @@
  *
  * Rules:
  * - Never invent surrounding paragraphs.
- * - limitedContext=true only when the snippet cannot be located in a
- *   resolvable source (corpus file and/or retrieved File Search text).
+ * - limitedContext=true only when no grounding snippet/context can be
+ *   attached. Neighbor lookup may still fail; that does not invent text
+ *   and does not flip limitedContext if a retrieved chunk is present.
  * - Neighbors are copied only when they actually exist in that source.
  */
 
@@ -15,6 +16,8 @@ export type CitationLike = {
   teacher?: string;
   file?: string;
   snippet?: string;
+  context?: string;
+  sourceFile?: string;
 };
 
 export type CorpusDoc = {
@@ -243,7 +246,7 @@ export function expandCitation(
     retrievedText?: string;
   } = {},
 ): PassageExpansion {
-  const snippet = cite.snippet;
+  const snippet = cite.snippet || cite.context;
   const docs = resolveCorpusDocs(cite, options.corpus ?? []);
 
   if (docs.length === 1) {
@@ -264,6 +267,42 @@ export function expandCitation(
   return { limitedContext: true };
 }
 
+function retrievedTextForCite(
+  cite: CitationLike,
+  retrievedTextByFile?: Map<string, string>,
+): string | undefined {
+  if (!retrievedTextByFile?.size) return undefined;
+  const names = [cite.sourceFile, cite.file].filter((v): v is string => !!v);
+  for (const raw of names) {
+    const keys = [
+      raw.toLowerCase(),
+      compactForMatch(raw),
+      slugForMatch(raw),
+      compactForMatch(raw.split(/[\\/]/).pop() ?? ""),
+    ];
+    for (const key of keys) {
+      if (!key) continue;
+      const hit = retrievedTextByFile.get(key);
+      if (hit) return hit;
+    }
+  }
+
+  const needles = names.map((n) => compactForMatch(n)).filter(Boolean);
+  if (!needles.length) return undefined;
+  for (const [key, text] of retrievedTextByFile) {
+    const compactKey = compactForMatch(key);
+    if (needles.some((n) => compactKey === n || compactKey.includes(n) || n.includes(compactKey))) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function attachedGroundingText(cite: CitationLike): string | undefined {
+  const text = (cite.snippet || cite.context || "").trim();
+  return text || undefined;
+}
+
 export function expandCitations<T extends CitationLike>(
   citations: T[],
   options: {
@@ -272,21 +311,35 @@ export function expandCitations<T extends CitationLike>(
   } = {},
 ): Array<T & PassageExpansion> {
   return citations.map((cite) => {
-    const fileKey = (cite.file ?? "").toLowerCase();
-    const retrievedText = options.retrievedTextByFile?.get(fileKey);
+    const retrievedText = retrievedTextForCite(cite, options.retrievedTextByFile);
     const expansion = expandCitation(cite, {
       corpus: options.corpus,
       retrievedText,
     });
+    const grounded = attachedGroundingText(cite);
     const next: T & PassageExpansion = { ...cite, limitedContext: expansion.limitedContext };
     if (!expansion.limitedContext) {
+      next.limitedContext = false;
       if (expansion.contextBefore) next.contextBefore = expansion.contextBefore;
       if (expansion.passage) {
         next.passage = expansion.passage;
         next.paragraph = expansion.passage;
       }
       if (expansion.contextAfter) next.contextAfter = expansion.contextAfter;
+      if (grounded && !next.context) next.context = grounded;
+      return next;
     }
+
+    // Neighbors could not be resolved. Keep retrieved chunk text; do not invent
+    // surrounding paragraphs. limitedContext only when nothing was attached.
+    if (grounded) {
+      next.limitedContext = false;
+      next.snippet = cite.snippet || grounded;
+      next.context = cite.context || grounded;
+      return next;
+    }
+
+    next.limitedContext = true;
     return next;
   });
 }

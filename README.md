@@ -12,9 +12,7 @@ Production URL: `https://onesong-ask-bridge.vercel.app` (do not change onesong.g
 Successful Ask responses include citation objects that may carry:
 
 - `snippet` — File Search excerpt (unchanged)
-- `passage` / `paragraph` — full containing paragraph when a source resolved
-- `contextBefore` / `contextAfter` — neighboring paragraphs from that same source
-- `limitedContext: true` — only when expansion could not locate the snippet; no invented neighbors
+- `limitedContext: true` — only when no File Search snippet/context could be attached; no invented neighbors
 - `corpusAvailable` — whether markdown was bundled under `corpus/`
 
 ### Corpus: keep thin on the bridge
