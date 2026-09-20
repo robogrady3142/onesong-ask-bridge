@@ -12,7 +12,7 @@
 import {
   displayTeacherName,
   type QuestionCitation,
-} from "./question-citations.ts";
+} from "./question-citations";
 
 export type AskMode = "default" | "custom";
 
