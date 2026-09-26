@@ -794,6 +794,8 @@ ${draft.rawAnswer}`,
       const msg = err instanceof Error ? err.message : String(err);
       lastError = scrubError(`${model}: ${msg}`);
       modelFailures.push(err);
+      // Server log only (key redacted): the client still gets the safe message.
+      console.error("[ask] model failed:", lastError.slice(0, 1200));
     }
   }
 
