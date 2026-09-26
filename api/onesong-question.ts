@@ -139,11 +139,11 @@ ${authorRule}
 const MODEL_CANDIDATES = modelCandidatesForDepth("standard");
 
 /**
- * Last-resort answer model when the 3.5 models are busy or out of free-tier quota
+ * Last-resort answer model (Google names it as the successor to 2.5 Flash) when the 3.5 models are busy or out of free-tier quota
  * (each model has its own daily allowance). If this key cannot use it, the 404 is
  * ignored when deciding whether the failure was "busy".
  */
-const LAST_RESORT_MODEL = "gemini-2.5-flash";
+const LAST_RESORT_MODEL = "gemini-3.8-flash";
 
 /**
  * Models that hit their free-tier quota, and when to try them again. Per warm

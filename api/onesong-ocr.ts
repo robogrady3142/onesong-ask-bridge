@@ -25,7 +25,7 @@ export const config = {
 const BRIDGE_HEADER = "x-onesong-bridge";
 const BRIDGE_TOKEN = "onesong-bridge-2026-09";
 /** Lite first: it has its own free-tier allowance, which leaves 3.5 Flash's for Ask. */
-const OCR_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash"] as const;
+const OCR_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"] as const;
 
 type OcrResult =
   | { ok: true; text: string; model: string }
