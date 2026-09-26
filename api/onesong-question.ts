@@ -18,6 +18,13 @@ import {
 import { getCorpus } from "../lib/question-md-corpus";
 import { countWords, lengthRewriteNudge, parseMinWords, withMinWords } from "../lib/min-words";
 import {
+  OPEN_QUESTION_MAX_OUTPUT_TOKENS,
+  OPEN_QUESTION_SYSTEM_PROMPT,
+  buildOpenQuestionPrompt,
+  cleanOpenQuestion,
+  parseOpenQuestion,
+} from "../lib/open-question";
+import {
   cleanGuidedReply,
   GUIDED_MAX_OUTPUT_TOKENS,
   GUIDED_SYSTEM_PROMPT,
@@ -146,6 +153,8 @@ type QuestionAskResult =
       corpusAvailable: boolean;
       /** Present (true) only on guided-exploration replies. */
       guided?: true;
+      /** Present only when the request set openQuestion: true and a question was written. */
+      followUpQuestion?: string;
     }
   | {
       ok: false;
@@ -471,6 +480,37 @@ async function generateMergedAsk(
   return { extracted, taken, merged, rawAnswer };
 }
 
+/** One open follow-up question for the answer; "" if it cannot be written (never fails the Ask). */
+async function writeOpenQuestion(
+  ai: GoogleGenAI,
+  answerModel: string,
+  question: string,
+  answer: string,
+): Promise<string> {
+  const models = [answerModel, ...MODEL_CANDIDATES.filter((m) => m !== answerModel)];
+  for (const model of models.slice(0, 2)) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: buildOpenQuestionPrompt(question, answer),
+        config: {
+          systemInstruction: OPEN_QUESTION_SYSTEM_PROMPT,
+          maxOutputTokens: OPEN_QUESTION_MAX_OUTPUT_TOKENS,
+        },
+      });
+      const text =
+        typeof (response as { text?: string }).text === "string"
+          ? (response as { text: string }).text
+          : "";
+      const q = cleanOpenQuestion(text);
+      if (q) return q;
+    } catch {
+      // Try the next model; the answer is returned either way.
+    }
+  }
+  return "";
+}
+
 function isAuthorized(request: Request): boolean {
   return request.headers.get(BRIDGE_HEADER) === BRIDGE_TOKEN;
 }
@@ -529,6 +569,8 @@ export async function POST(request: Request): Promise<Response> {
   const depth = parseAskDepth(body);
   // Optional (additive): a word minimum for personalised standard answers.
   const minWords = parseMinWords(body);
+  // Optional (additive): one open follow-up question after the sourced answer.
+  const wantsOpenQuestion = parseOpenQuestion(body);
   const rawTeachers = Array.isArray(body.teachers)
     ? body.teachers.filter((t): t is string => typeof t === "string")
     : [];
@@ -727,6 +769,11 @@ ${draft.rawAnswer}`,
         continue;
       }
 
+      let followUpQuestion = "";
+      if (wantsOpenQuestion) {
+        followUpQuestion = await writeOpenQuestion(ai, model, question, answer);
+      }
+
       return jsonResponse(
         request,
         {
@@ -739,6 +786,7 @@ ${draft.rawAnswer}`,
           teachers,
           depth,
           corpusAvailable: corpus.length > 0,
+          ...(followUpQuestion ? { followUpQuestion } : {}),
         },
         200,
       );
