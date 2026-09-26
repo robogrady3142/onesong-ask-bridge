@@ -17,6 +17,12 @@ import {
 } from "../lib/question-citations";
 import { getCorpus } from "../lib/question-md-corpus";
 import {
+  cleanGuidedReply,
+  GUIDED_MAX_OUTPUT_TOKENS,
+  GUIDED_SYSTEM_PROMPT,
+  parseGuided,
+} from "../lib/guided-exploration";
+import {
   type AskDepth,
   answerLengthInstruction,
   citationNudgeForAsk,
@@ -137,6 +143,8 @@ type QuestionAskResult =
       depth: AskDepth;
       /** True when markdown files were bundled under corpus/. */
       corpusAvailable: boolean;
+      /** Present (true) only on guided-exploration replies. */
+      guided?: true;
     }
   | {
       ok: false;
@@ -542,6 +550,61 @@ export async function POST(request: Request): Promise<Response> {
     mode === "custom" ? buildTeacherFilter(teachers) : undefined;
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+
+  // Optional guided-exploration mode: a short neutral reflection + one open
+  // question. No File Search, citations or teacher retry. Only when guided: true.
+  if (parseGuided(body)) {
+    let guidedError = "All models failed.";
+    const guidedFailures: unknown[] = [];
+    for (const model of MODEL_CANDIDATES) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: question,
+          config: {
+            systemInstruction: GUIDED_SYSTEM_PROMPT,
+            maxOutputTokens: GUIDED_MAX_OUTPUT_TOKENS,
+          },
+        });
+        const text =
+          typeof (response as { text?: string }).text === "string"
+            ? (response as { text: string }).text
+            : "";
+        const answer = cleanGuidedReply(text);
+        if (!answer) {
+          guidedError = `${model}: empty answer`;
+          guidedFailures.push(guidedError);
+          continue;
+        }
+        return jsonResponse(
+          request,
+          {
+            ok: true,
+            answer,
+            citations: [],
+            model,
+            store: FILE_SEARCH_STORE,
+            mode,
+            teachers,
+            depth: "standard",
+            corpusAvailable: false,
+            guided: true,
+          },
+          200,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        guidedError = scrubError(`${model}: ${msg}`);
+        guidedFailures.push(err);
+      }
+    }
+    const failure = classifyAskModelExhaustion(guidedFailures, guidedError);
+    return jsonResponse(
+      request,
+      { ok: false, code: failure.code, error: failure.error },
+      failure.status,
+    );
+  }
 
   let lastError = "All models failed.";
   const modelFailures: unknown[] = [];
