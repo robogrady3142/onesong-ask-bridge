@@ -7,7 +7,14 @@
  * Env: GEMINI_API_KEY (already set on rob-4dcd/solintra)
  */
 import { GoogleGenAI } from "@google/genai";
-import { classifyAskModelExhaustion, scrubError } from "../lib/ask-client-error";
+import {
+  classifyAskModelExhaustion,
+  isDailyQuotaError,
+  isHighDemandError,
+  isQuotaError,
+  quotaRetryDelaySeconds,
+  scrubError,
+} from "../lib/ask-client-error";
 import { expandCitations } from "../lib/citation-passage-context";
 import {
   displayTeacherName,
@@ -130,6 +137,34 @@ ${authorRule}
 }
 
 const MODEL_CANDIDATES = modelCandidatesForDepth("standard");
+
+/**
+ * Last-resort answer model when the 3.5 models are busy or out of free-tier quota
+ * (each model has its own daily allowance). If this key cannot use it, the 404 is
+ * ignored when deciding whether the failure was "busy".
+ */
+const LAST_RESORT_MODEL = "gemini-2.5-flash";
+
+/**
+ * Models that hit their free-tier quota, and when to try them again. Per warm
+ * instance only; it just saves a wasted call (and seconds) on every Ask.
+ */
+const modelCooldownUntil = new Map<string, number>();
+
+function noteModelFailure(model: string, err: unknown) {
+  if (!isQuotaError(err)) return;
+  const seconds = isDailyQuotaError(err) ? 30 * 60 : Math.max(quotaRetryDelaySeconds(err) ?? 30, 10);
+  modelCooldownUntil.set(model, Date.now() + seconds * 1000);
+}
+
+/** Candidates in order, minus any still cooling down (unless that would leave none). */
+function usableModels(candidates: readonly string[]): string[] {
+  const now = Date.now();
+  const ready = candidates.filter((m) => (modelCooldownUntil.get(m) ?? 0) <= now);
+  return ready.length ? ready : [...candidates];
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const BRIDGE_HEADER = "x-onesong-bridge";
 const BRIDGE_TOKEN = "onesong-bridge-2026-09";
@@ -653,8 +688,24 @@ export async function POST(request: Request): Promise<Response> {
 
   let lastError = "All models failed.";
   const modelFailures: unknown[] = [];
-  const models = depth === "deep" ? modelCandidatesForDepth("deep") : MODEL_CANDIDATES;
+  const baseModels = depth === "deep" ? modelCandidatesForDepth("deep") : MODEL_CANDIDATES;
+  const models = usableModels([...baseModels, LAST_RESORT_MODEL]);
+  const startedAt = Date.now();
+  // One short wait-and-retry per model when it is only busy (503), while time allows.
+  const attempts: string[] = [];
   for (const model of models) {
+    attempts.push(model);
+    if (model !== LAST_RESORT_MODEL) attempts.push(model);
+  }
+  let previous = "";
+  let previousBusy = false;
+  for (const model of attempts) {
+    if (model === previous) {
+      if (!previousBusy || Date.now() - startedAt > 60_000) continue;
+      await sleep(2500);
+    }
+    previous = model;
+    previousBusy = false;
     try {
       const fileSearch: Record<string, unknown> = {
         fileSearchStoreNames: [FILE_SEARCH_STORE],
@@ -794,6 +845,8 @@ ${draft.rawAnswer}`,
       const msg = err instanceof Error ? err.message : String(err);
       lastError = scrubError(`${model}: ${msg}`);
       modelFailures.push(err);
+      noteModelFailure(model, err);
+      previousBusy = isHighDemandError(err);
       // Server log only (key redacted): the client still gets the safe message.
       console.error("[ask] model failed:", lastError.slice(0, 1200));
     }
