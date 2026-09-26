@@ -5,6 +5,10 @@
       "maxDuration": 180,
       "memory": 1024,
       "includeFiles": "corpus/**"
+    },
+    "api/onesong-ocr.ts": {
+      "maxDuration": 120,
+      "memory": 1024
     }
   }
 }
