@@ -16,6 +16,7 @@ import {
   type QuestionCitation,
 } from "../lib/question-citations";
 import { getCorpus } from "../lib/question-md-corpus";
+import { countWords, lengthRewriteNudge, parseMinWords, withMinWords } from "../lib/min-words";
 import {
   cleanGuidedReply,
   GUIDED_MAX_OUTPUT_TOKENS,
@@ -526,6 +527,8 @@ export async function POST(request: Request): Promise<Response> {
 
   const mode = body.mode === "custom" ? "custom" : "default";
   const depth = parseAskDepth(body);
+  // Optional (additive): a word minimum for personalised standard answers.
+  const minWords = parseMinWords(body);
   const rawTeachers = Array.isArray(body.teachers)
     ? body.teachers.filter((t): t is string => typeof t === "string")
     : [];
@@ -618,14 +621,14 @@ export async function POST(request: Request): Promise<Response> {
         fileSearch.metadataFilter = metadataFilter;
       }
 
-      const citationNudge = citationNudgeForAsk(mode, teachers, depth);
+      const citationNudge = withMinWords(citationNudgeForAsk(mode, teachers, depth), minWords);
       let draft = await generateMergedAsk(
         ai,
         model,
         `${question}
 
 (${citationNudge})`,
-        buildSystemPrompt(mode, teachers, { depth }),
+        withMinWords(buildSystemPrompt(mode, teachers, { depth }), minWords),
         fileSearch,
       );
 
@@ -635,11 +638,9 @@ export async function POST(request: Request): Promise<Response> {
       // Narrow Custom (standard 1–2) is exempt. Never invent citations if the rewrite still falls short.
       if (shouldRetryForMinTeachers(mode, teachers, draft.merged, depth)) {
         try {
-          const rewriteNudge = rewriteNudgeForAsk(
-            uniqueTeacherSurnames(draft.merged),
-            mode,
-            teachers,
-            depth,
+          const rewriteNudge = withMinWords(
+            rewriteNudgeForAsk(uniqueTeacherSurnames(draft.merged), mode, teachers, depth),
+            minWords,
           );
           const retry = await generateMergedAsk(
             ai,
@@ -650,7 +651,7 @@ export async function POST(request: Request): Promise<Response> {
 
 Previous draft (incomplete — too few distinct teacher surnames):
 ${draft.rawAnswer}`,
-            buildSystemPrompt(mode, teachers, { rewrite: true, depth }),
+            withMinWords(buildSystemPrompt(mode, teachers, { rewrite: true, depth }), minWords),
             fileSearch,
           );
           if (
@@ -673,6 +674,43 @@ ${draft.rawAnswer}`,
           }
         } catch {
           // Keep the first draft; do not invent missing teachers.
+        }
+      }
+
+      // minWords only: one expand-rewrite when the draft is still short.
+      if (minWords && countWords(draft.taken.answer) < minWords) {
+        try {
+          const words = countWords(draft.taken.answer);
+          const longer = await generateMergedAsk(
+            ai,
+            model,
+            `${question}
+
+(${lengthRewriteNudge(minWords, words)})
+
+Previous draft (too short):
+${draft.rawAnswer}`,
+            withMinWords(buildSystemPrompt(mode, teachers, { depth }), minWords),
+            fileSearch,
+          );
+          if (
+            countWords(longer.taken.answer) > words &&
+            uniqueTeacherSurnames(longer.merged).length >=
+              Math.min(uniqueTeacherSurnames(draft.merged).length, 3)
+          ) {
+            draft = {
+              ...longer,
+              extracted: {
+                citations: longer.extracted.citations,
+                retrievedTextByFile: mergeRetrievedTextByFile(
+                  draft.extracted.retrievedTextByFile,
+                  longer.extracted.retrievedTextByFile,
+                ),
+              },
+            };
+          }
+        } catch {
+          // Keep the first draft.
         }
       }
 
