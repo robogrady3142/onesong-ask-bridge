@@ -82,6 +82,7 @@ export async function POST(request: Request): Promise<Response> {
       } catch (err) {
         failures.push(err);
         lastError = err instanceof Error ? err.message : String(err);
+        console.error("[ocr] model failed:", `${model}: ${lastError}`.split(apiKey).join("[redacted]").slice(0, 1200));
         if (!isHighDemandError(err)) break;
         await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       }
