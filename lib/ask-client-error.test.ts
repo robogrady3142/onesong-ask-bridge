@@ -117,3 +117,41 @@ test("scrubError redacts API key material", () => {
   assert.equal(scrubError(`failed ${key}`, key), "failed [redacted]");
   assert.doesNotMatch(clientSafeError(`boom ${key} ${GEMINI_503_JSON}`, key), /AIzaSy/);
 });
+
+const GEMINI_429_DAILY_JSON =
+  '{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.5-flash\\nPlease retry in 27.398122257s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"20"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"27s"}]}}';
+const GEMINI_404_JSON =
+  '{"error":{"code":404,"message":"models/gemini-2.5-flash is not found for API version v1beta","status":"NOT_FOUND"}}';
+
+test("quota helpers recognise the free-tier daily 429 and its retry delay", async () => {
+  const { isQuotaError, isDailyQuotaError, quotaRetryDelaySeconds, isModelNotFoundError } = await import(
+    "./ask-client-error.ts"
+  );
+  assert.equal(isQuotaError(new FakeApiError(GEMINI_429_DAILY_JSON, 429)), true);
+  assert.equal(isDailyQuotaError(`gemini-3.5-flash: ${GEMINI_429_DAILY_JSON}`), true);
+  assert.equal(quotaRetryDelaySeconds(GEMINI_429_DAILY_JSON), 28);
+  assert.equal(isQuotaError(GEMINI_503_JSON), false);
+  assert.equal(isModelNotFoundError(new FakeApiError(GEMINI_404_JSON, 404)), true);
+  assert.equal(isModelNotFoundError(GEMINI_503_JSON), false);
+});
+
+test("classifyAskModelExhaustion: 503 on lite + daily 429 on flash (26 Sep live failure) is calm, not generic", async () => {
+  const { QUOTA_OR_BUSY_ERROR } = await import("./ask-client-error.ts");
+  const failure = classifyAskModelExhaustion(
+    [
+      new FakeApiError(GEMINI_503_JSON, 503),
+      new FakeApiError(GEMINI_429_DAILY_JSON, 429),
+      new FakeApiError(GEMINI_404_JSON, 404),
+    ],
+    `gemini-2.5-flash: ${GEMINI_404_JSON}`,
+  );
+  assert.equal(failure.code, HIGH_DEMAND_CODE);
+  assert.equal(failure.status, 503);
+  assert.equal(failure.error, QUOTA_OR_BUSY_ERROR);
+  assert.notEqual(failure.error, GENERIC_ASK_ERROR);
+});
+
+test("classifyAskModelExhaustion: only 404s stay code error", () => {
+  const failure = classifyAskModelExhaustion([new FakeApiError(GEMINI_404_JSON, 404)], GEMINI_404_JSON);
+  assert.equal(failure.code, "error");
+});

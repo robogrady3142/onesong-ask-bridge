@@ -8,6 +8,10 @@ export const HIGH_DEMAND_CODE = "high_demand" as const;
 export const HIGH_DEMAND_ERROR =
   "We use a free-tier Gemini model for Ask. There is high demand right now — please try again shortly.";
 
+/** Some models are at their free-tier limit and the rest are busy. */
+export const QUOTA_OR_BUSY_ERROR =
+  "We use a free-tier Gemini model for Ask, and it is busy or has reached its limit right now. Please try again in a few minutes.";
+
 export const GENERIC_ASK_ERROR =
   "Ask could not complete this request. Please try again.";
 
@@ -113,6 +117,43 @@ export function isHighDemandError(err: unknown): boolean {
   return false;
 }
 
+/** Free-tier quota hit (429 / RESOURCE_EXHAUSTED): per-minute or per-day request limits. */
+export function isQuotaError(err: unknown): boolean {
+  if (err == null) return false;
+  if (typeof err === "object") {
+    const rec = err as Record<string, unknown>;
+    if (numericCode(rec.status) === 429 || numericCode(rec.code) === 429) return true;
+  }
+  const text = errorText(err);
+  return /\b429\b|RESOURCE_EXHAUSTED|exceeded your current quota/i.test(text);
+}
+
+/** Per-day quota (as opposed to a per-minute burst limit). */
+export function isDailyQuotaError(err: unknown): boolean {
+  return isQuotaError(err) && /PerDay/i.test(errorText(err));
+}
+
+/** Seconds Gemini suggests waiting before a retry, if it said. */
+export function quotaRetryDelaySeconds(err: unknown): number | undefined {
+  const m = errorText(err).match(/retry(?:Delay"?\s*:\s*"|\s+in\s+)(\d+(?:\.\d+)?)s/i);
+  return m ? Math.ceil(Number(m[1])) : undefined;
+}
+
+/** The model name is not available to this key / API version. */
+export function isModelNotFoundError(err: unknown): boolean {
+  if (err && typeof err === "object") {
+    const rec = err as Record<string, unknown>;
+    if (numericCode(rec.status) === 404) return true;
+  }
+  const text = errorText(err);
+  return /"code"\s*:\s*404|\bNOT_FOUND\b|is not found for API version|models\/[\w.-]+ is not found/i.test(text);
+}
+
+/** Temporary capacity problems: busy model (503) or free-tier quota (429). */
+export function isBusyOrQuotaError(err: unknown): boolean {
+  return isHighDemandError(err) || isQuotaError(err);
+}
+
 export function containsRawApiJson(message: string): boolean {
   return extractJsonObjects(message).length > 0;
 }
@@ -139,11 +180,13 @@ export function classifyAskModelExhaustion(
   lastError: string,
   apiKey?: string,
 ): AskModelFailure {
-  if (failures.length > 0 && failures.every(isHighDemandError)) {
+  // A fallback model this key cannot use (404) says nothing about capacity; judge the rest.
+  const relevant = failures.filter((f) => !isModelNotFoundError(f));
+  if (relevant.length > 0 && relevant.every(isBusyOrQuotaError)) {
     return {
       ok: false,
       code: HIGH_DEMAND_CODE,
-      error: HIGH_DEMAND_ERROR,
+      error: relevant.some(isQuotaError) ? QUOTA_OR_BUSY_ERROR : HIGH_DEMAND_ERROR,
       status: 503,
     };
   }
